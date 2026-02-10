@@ -12,11 +12,11 @@ Boot flow: `boot.s` (_start) → EL2→EL1 drop → BSS clear → `mmu::init()` 
 |---|---|---|
 | `boot.s` | Entry, EL2→EL1, SP, BSS clear | Included via `global_asm!` in main.rs |
 | `mmu.rs` | Identity-mapped page tables, W^X | L1→L2→L3, 4KB pages for kernel, 2MB blocks for RAM, device at indices 64–72. User stacks: `AP_RW_EL0`, code: `SHARED_CODE_PAGE`, kernel data: `AP_RW_EL1` (EL0 no access) |
-| `exception.rs` | Vector table, TrapFrame, ESR dispatch | **TrapFrame is ABI-locked at 288 bytes**. Lower-EL vectors use `SAVE_CONTEXT_LOWER` (loads SP from `__stack_end`, stashes x9 in `TPIDR_EL1`) |
+| `exception.rs` | Vector table, TrapFrame, ESR dispatch | **TrapFrame is ABI-locked at 288 bytes**. Lower-EL vectors use `SAVE_CONTEXT_LOWER` (loads SP from `__stack_end`, stashes x9 in `TPIDR_EL1`). **Fault isolation:** lower-EL faults → `fault_current_task()` + schedule away; same-EL faults → halt (kernel bug). |
 | `gic.rs` | GICv2 driver | GICD `0x0800_0000`, GICC `0x0801_0000` |
 | `timer.rs` | ARM Generic Timer (CNTP_EL0) | INTID 30, 10ms tick, 62.5 MHz on QEMU |
-| `sched.rs` | Round-robin scheduler, 3 static TCBs | SPSR = `0x000` (EL0t). Context switch = copy TrapFrame in/out of `TCBS[]`. Shared kernel boot stack for all handlers. |
-| `ipc.rs` | Synchronous endpoint IPC | Blocking send/recv, message in x[0..3] |
+| `sched.rs` | Round-robin scheduler, 3 static TCBs | SPSR = `0x000` (EL0t). Context switch = copy TrapFrame in/out of `TCBS[]`. Shared kernel boot stack for all handlers. **Fault isolation:** `TaskState::Faulted` + auto-restart after 100 ticks (1s). TCB stores `entry_point`/`user_stack_top` for restart. |
+| `ipc.rs` | Synchronous endpoint IPC | Blocking send/recv, message in x[0..3]. `cleanup_task()` removes faulted task from endpoint slots. |
 | `main.rs` | UART, syscall wrappers, task entries | EL0 tasks use `user_print()` → `SYS_WRITE` syscall (#4) for UART output. `uart_print` is kernel-only. |
 
 ## Build & Run

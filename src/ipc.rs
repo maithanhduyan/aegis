@@ -151,3 +151,32 @@ unsafe fn copy_message(from_task: usize, to_task: usize) {
         sched::set_task_reg(to_task, i, val);
     }
 }
+
+// ─── Fault cleanup ─────────────────────────────────────────────────
+
+/// Remove a faulted task from all IPC endpoint slots.
+/// If a partner was blocked waiting for this task, unblock the partner
+/// so it can be rescheduled (partner will retry IPC or find no match).
+pub fn cleanup_task(task_idx: usize) {
+    unsafe {
+        for i in 0..MAX_ENDPOINTS {
+            // If the faulted task was a pending sender, clear the slot
+            if ENDPOINTS[i].sender == Some(task_idx) {
+                ENDPOINTS[i].sender = None;
+            }
+
+            // If the faulted task was a pending receiver, clear the slot
+            if ENDPOINTS[i].receiver == Some(task_idx) {
+                ENDPOINTS[i].receiver = None;
+            }
+        }
+
+        // Also check: is any other task Blocked because it was waiting
+        // for a rendezvous with the faulted task? In synchronous IPC,
+        // a task blocks *on an endpoint*, not on a specific partner.
+        // So if partner is blocked on ep.sender/receiver, it stays blocked
+        // until another task does the complementary operation.
+        // This is correct for synchronous IPC — partner will be unblocked
+        // when the faulted task restarts and re-enters IPC.
+    }
+}

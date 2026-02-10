@@ -322,7 +322,7 @@ pub extern "C" fn exception_dispatch_sync(frame: &mut TrapFrame, source: u64) {
         0x15 => handle_svc(frame, esr),
         0x20 | 0x21 => handle_instruction_abort(frame, esr, source),
         0x24 | 0x25 => handle_data_abort(frame, esr, source),
-        0x07 => handle_fp_trap(frame, esr),
+        0x07 => handle_fp_trap(frame, esr, source),
         _ => handle_unknown(frame, esr, ec, source),
     }
 }
@@ -375,7 +375,8 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
         _ => {
             uart_print("!!! unknown syscall #");
             uart_print_hex(syscall_nr);
-            uart_print(" !!!\n");
+            uart_print(" — faulting task\n");
+            crate::sched::fault_current_task(frame);
         }
     }
 }
@@ -408,20 +409,32 @@ fn handle_sys_write(frame: &TrapFrame) {
     }
 }
 
-/// Instruction Abort handler — print fault details, halt
+/// Instruction Abort handler — fault task if from lower EL, halt if from same EL
 fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
 
     let ec = (esr >> 26) & 0x3F;
-    let ifsc = esr & 0x3F; // Instruction Fault Status Code
+    let ifsc = esr & 0x3F;
 
-    uart_print("\n!!! INSTRUCTION ABORT !!!\n");
+    uart_print("\n!!! INSTRUCTION ABORT !!!");
     if ec == 0x20 {
-        uart_print("  Source: lower EL\n");
-    } else {
-        uart_print("  Source: same EL\n");
+        // Lower EL (EL0 task) — recoverable fault
+        uart_print(" [EL0 task]\n");
+        uart_print("  IFSC: 0x");
+        uart_print_hex(ifsc);
+        print_fault_class(ifsc);
+        uart_print("\n  FAR:  0x");
+        uart_print_hex(far);
+        uart_print("\n  ELR:  0x");
+        uart_print_hex(frame.elr_el1);
+        uart_print("\n");
+        crate::sched::fault_current_task(frame);
+        return;
     }
+    // Same EL (kernel) — fatal, halt
+    uart_print(" [KERNEL]\n");
+    uart_print("  Source: same EL\n");
     uart_print("  IFSC: 0x");
     uart_print_hex(ifsc);
     print_fault_class(ifsc);
@@ -437,20 +450,38 @@ fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
-/// Data Abort handler — print fault details, halt
+/// Data Abort handler — fault task if from lower EL, halt if from same EL
 fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
 
     let ec = (esr >> 26) & 0x3F;
-    let dfsc = esr & 0x3F; // Data Fault Status Code
+    let dfsc = esr & 0x3F;
 
-    uart_print("\n!!! DATA ABORT !!!\n");
+    uart_print("\n!!! DATA ABORT !!!");
     if ec == 0x24 {
-        uart_print("  Source: lower EL\n");
-    } else {
-        uart_print("  Source: same EL\n");
+        // Lower EL (EL0 task) — recoverable fault
+        uart_print(" [EL0 task]\n");
+        uart_print("  DFSC: 0x");
+        uart_print_hex(dfsc);
+        print_fault_class(dfsc);
+        let wnr = (esr >> 6) & 1;
+        if wnr == 1 {
+            uart_print("\n  Access: WRITE");
+        } else {
+            uart_print("\n  Access: READ");
+        }
+        uart_print("\n  FAR:  0x");
+        uart_print_hex(far);
+        uart_print("\n  ELR:  0x");
+        uart_print_hex(frame.elr_el1);
+        uart_print("\n");
+        crate::sched::fault_current_task(frame);
+        return;
     }
+    // Same EL (kernel) — fatal, halt
+    uart_print(" [KERNEL]\n");
+    uart_print("  Source: same EL\n");
     uart_print("  DFSC: 0x");
     uart_print_hex(dfsc);
     print_fault_class(dfsc);
@@ -472,9 +503,21 @@ fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
-/// FP/SIMD trap — kernel should not use FP
-fn handle_fp_trap(_frame: &mut TrapFrame, esr: u64) {
-    uart_print("\n!!! FP/SIMD TRAP !!!\n");
+/// FP/SIMD trap — fault task if from lower EL, halt if from same EL
+fn handle_fp_trap(frame: &mut TrapFrame, esr: u64, source: u64) {
+    uart_print("\n!!! FP/SIMD TRAP !!!");
+    if source == 2 {
+        // Lower EL (EL0 task) — recoverable
+        uart_print(" [EL0 task]\n");
+        uart_print("  Task attempted FP/SIMD instruction.\n");
+        uart_print("  ESR: 0x");
+        uart_print_hex(esr);
+        uart_print("\n");
+        crate::sched::fault_current_task(frame);
+        return;
+    }
+    // Same EL (kernel) — fatal
+    uart_print(" [KERNEL]\n");
     uart_print("  Kernel code attempted FP instruction.\n");
     uart_print("  ESR: 0x");
     uart_print_hex(esr);
@@ -482,9 +525,24 @@ fn handle_fp_trap(_frame: &mut TrapFrame, esr: u64) {
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
-/// Unknown/unhandled exception class
+/// Unknown/unhandled exception class — fault task if from lower EL, halt if same EL
 fn handle_unknown(frame: &mut TrapFrame, esr: u64, ec: u64, source: u64) {
-    uart_print("\n!!! UNHANDLED EXCEPTION !!!\n");
+    uart_print("\n!!! UNHANDLED EXCEPTION !!!");
+    if source == 2 {
+        // Lower EL (EL0 task) — recoverable
+        uart_print(" [EL0 task]\n");
+        uart_print("  EC:   0x");
+        uart_print_hex(ec);
+        uart_print("\n  ESR:  0x");
+        uart_print_hex(esr);
+        uart_print("\n  ELR:  0x");
+        uart_print_hex(frame.elr_el1);
+        uart_print("\n");
+        crate::sched::fault_current_task(frame);
+        return;
+    }
+    // Same EL (kernel) — fatal
+    uart_print(" [KERNEL]\n");
     uart_print("  EC:   0x");
     uart_print_hex(ec);
     uart_print("\n  ESR:  0x");

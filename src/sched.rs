@@ -21,6 +21,7 @@ pub enum TaskState {
     Ready    = 1,
     Running  = 2,
     Blocked  = 3,
+    Faulted  = 4,
 }
 
 // ─── Task Control Block ────────────────────────────────────────────
@@ -31,7 +32,10 @@ pub struct Tcb {
     pub context: TrapFrame,
     pub state: TaskState,
     pub id: u16,
-    pub stack_top: u64,  // top of this task's kernel stack (SP_EL1)
+    pub stack_top: u64,       // top of this task's kernel stack (SP_EL1)
+    pub entry_point: u64,     // original entry address (for restart)
+    pub user_stack_top: u64,  // original SP_EL0 top (for restart)
+    pub fault_tick: u64,      // tick when task was marked Faulted
 }
 
 // ─── Static task table ─────────────────────────────────────────────
@@ -41,6 +45,9 @@ const NUM_TASKS: usize = 3;
 
 static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
 static mut CURRENT: usize = 0;
+
+/// Delay before auto-restarting a faulted task (100 ticks × 10ms = 1 second)
+const RESTART_DELAY_TICKS: u64 = 100;
 
 const EMPTY_TCB: Tcb = Tcb {
     context: TrapFrame {
@@ -53,6 +60,9 @@ const EMPTY_TCB: Tcb = Tcb {
     state: TaskState::Inactive,
     id: 0,
     stack_top: 0,
+    entry_point: 0,
+    user_stack_top: 0,
+    fault_tick: 0,
 };
 
 // ─── Public API ────────────────────────────────────────────────────
@@ -79,26 +89,32 @@ pub fn init(
         // Task 0: task_a
         TCBS[0].id = 0;
         TCBS[0].state = TaskState::Ready;
-        TCBS[0].stack_top = kstacks_base + 1 * 4096; // kernel stack (SP_EL1)
+        TCBS[0].stack_top = kstacks_base + 1 * 4096;
+        TCBS[0].entry_point = task_a_entry;
+        TCBS[0].user_stack_top = ustacks_base + 1 * 4096;
         TCBS[0].context.elr_el1 = task_a_entry;
-        TCBS[0].context.spsr_el1 = 0x000; // EL0t — run at EL0
-        TCBS[0].context.sp_el0 = ustacks_base + 1 * 4096; // user stack (SP_EL0)
+        TCBS[0].context.spsr_el1 = 0x000; // EL0t
+        TCBS[0].context.sp_el0 = ustacks_base + 1 * 4096;
 
         // Task 1: task_b
         TCBS[1].id = 1;
         TCBS[1].state = TaskState::Ready;
-        TCBS[1].stack_top = kstacks_base + 2 * 4096; // kernel stack
+        TCBS[1].stack_top = kstacks_base + 2 * 4096;
+        TCBS[1].entry_point = task_b_entry;
+        TCBS[1].user_stack_top = ustacks_base + 2 * 4096;
         TCBS[1].context.elr_el1 = task_b_entry;
         TCBS[1].context.spsr_el1 = 0x000; // EL0t
-        TCBS[1].context.sp_el0 = ustacks_base + 2 * 4096; // user stack
+        TCBS[1].context.sp_el0 = ustacks_base + 2 * 4096;
 
         // Task 2: idle
         TCBS[2].id = 2;
         TCBS[2].state = TaskState::Ready;
-        TCBS[2].stack_top = kstacks_base + 3 * 4096; // kernel stack
+        TCBS[2].stack_top = kstacks_base + 3 * 4096;
+        TCBS[2].entry_point = idle_entry;
+        TCBS[2].user_stack_top = ustacks_base + 3 * 4096;
         TCBS[2].context.elr_el1 = idle_entry;
         TCBS[2].context.spsr_el1 = 0x000; // EL0t
-        TCBS[2].context.sp_el0 = ustacks_base + 3 * 4096; // user stack
+        TCBS[2].context.sp_el0 = ustacks_base + 3 * 4096;
     }
 
     uart_print("[AegisOS] scheduler ready (3 tasks, EL0)\n");
@@ -125,9 +141,19 @@ pub fn schedule(frame: &mut TrapFrame) {
             1,
         );
 
-        // Mark old task as Ready (unless it's Blocked)
+        // Mark old task as Ready (unless it's Blocked or Faulted)
         if TCBS[old].state == TaskState::Running {
             TCBS[old].state = TaskState::Ready;
+        }
+
+        // Auto-restart: check if any Faulted task has waited long enough
+        let now = crate::timer::tick_count();
+        for i in 0..NUM_TASKS {
+            if TCBS[i].state == TaskState::Faulted
+                && now.wrapping_sub(TCBS[i].fault_tick) >= RESTART_DELAY_TICKS
+            {
+                restart_task(i);
+            }
         }
 
         // Round-robin: find next Ready task
@@ -142,8 +168,11 @@ pub fn schedule(frame: &mut TrapFrame) {
         }
 
         if !found {
-            // No ready task — stay on idle (index 2)
+            // No ready task — force-restart idle (index 2) if faulted
             next = 2;
+            if TCBS[2].state == TaskState::Faulted {
+                restart_task(2);
+            }
             TCBS[2].state = TaskState::Ready;
         }
 
@@ -152,10 +181,6 @@ pub fn schedule(frame: &mut TrapFrame) {
         CURRENT = next;
 
         // Load new task's context into the frame.
-        // SAVE_CONTEXT_LOWER always uses the shared kernel boot stack,
-        // so RESTORE_CONTEXT_LOWER just pops the frame and erets.
-        // The TrapFrame's sp_el0 and spsr_el1 ensure eret lands at
-        // the correct EL0 task with the correct user stack.
         core::ptr::copy_nonoverlapping(
             &TCBS[next].context as *const TrapFrame,
             frame as *mut TrapFrame,
@@ -205,6 +230,63 @@ pub fn load_frame(task_idx: usize, frame: &mut TrapFrame) {
             frame as *mut TrapFrame,
             1,
         );
+    }
+}
+
+/// Mark the currently running task as Faulted, cleanup IPC, and schedule away.
+/// Called from exception handlers when a lower-EL fault is recoverable.
+pub fn fault_current_task(frame: &mut TrapFrame) {
+    unsafe {
+        let current = CURRENT;
+        let id = TCBS[current].id;
+
+        uart_print("[AegisOS] TASK ");
+        crate::uart_print_hex(id as u64);
+        uart_print(" FAULTED\n");
+
+        TCBS[current].state = TaskState::Faulted;
+        TCBS[current].fault_tick = crate::timer::tick_count();
+
+        // Clean up IPC endpoints — unblock any partner waiting for this task
+        crate::ipc::cleanup_task(current);
+
+        // Schedule away to the next ready task
+        schedule(frame);
+    }
+}
+
+/// Restart a faulted task: zero context, reload entry point + stack, mark Ready.
+/// Called from schedule() when restart delay has elapsed.
+fn restart_task(task_idx: usize) {
+    unsafe {
+        if TCBS[task_idx].state != TaskState::Faulted {
+            return;
+        }
+
+        let id = TCBS[task_idx].id;
+
+        // Zero user stack (4KB) to prevent state leakage
+        let ustack_top = TCBS[task_idx].user_stack_top;
+        let ustack_base = (ustack_top - 4096) as *mut u8;
+        core::ptr::write_bytes(ustack_base, 0, 4096);
+
+        // Zero entire TrapFrame
+        core::ptr::write_bytes(
+            &mut TCBS[task_idx].context as *mut TrapFrame as *mut u8,
+            0,
+            core::mem::size_of::<TrapFrame>(),
+        );
+
+        // Reload entry point, stack, SPSR
+        TCBS[task_idx].context.elr_el1 = TCBS[task_idx].entry_point;
+        TCBS[task_idx].context.spsr_el1 = 0x000; // EL0t
+        TCBS[task_idx].context.sp_el0 = ustack_top;
+
+        TCBS[task_idx].state = TaskState::Ready;
+
+        uart_print("[AegisOS] TASK ");
+        crate::uart_print_hex(id as u64);
+        uart_print(" RESTARTED\n");
     }
 }
 

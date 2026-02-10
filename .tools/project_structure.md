@@ -101,13 +101,23 @@ SECTIONS
     }
     __page_tables_end = .;
 
-    /* === Task Stacks (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    /* === Kernel Stacks per task (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    /* Used as SP_EL1 when handling exceptions from EL0 tasks */
     . = ALIGN(4096);
     __task_stacks_start = .;
     .task_stacks (NOLOAD) : {
         . += 3 * 4096;
     }
     __task_stacks_end = .;
+
+    /* === User Stacks per task (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    /* Used as SP_EL0 when tasks run in user mode (EL0) */
+    . = ALIGN(4096);
+    __user_stacks_start = .;
+    .user_stacks (NOLOAD) : {
+        . += 3 * 4096;
+    }
+    __user_stacks_end = .;
 
     /* === Stack Guard Page (4KB invalid — catches stack overflow) === */
     . = ALIGN(4096);
@@ -325,6 +335,7 @@ core::arch::global_asm!(r#"
 
 /* ═══════════════════════════════════════════════════════════════════
  * Restore all registers from a TrapFrame on the current SP, then eret.
+ * Used for same-EL exceptions (SP stays the same).
  * ═══════════════════════════════════════════════════════════════════ */
 .macro RESTORE_CONTEXT
     /* Restore ELR_EL1 + SPSR_EL1 */
@@ -358,6 +369,99 @@ core::arch::global_asm!(r#"
     add sp, sp, #288
 
     /* Return from exception — restores PC from ELR, PSTATE from SPSR */
+    eret
+.endm
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Save context for lower-EL (EL0→EL1) exceptions.
+ * Load SP from the kernel boot stack top before saving, so all
+ * exception handling uses the shared 16KB kernel stack regardless
+ * of which task was running. Single-core, no nesting.
+ * ═══════════════════════════════════════════════════════════════════ */
+.macro SAVE_CONTEXT_LOWER
+    /* When exception fires from EL0, CPU sets SP = SP_EL1 (whatever
+     * it was when we last eret'd). We must switch to the shared kernel
+     * boot stack (__stack_end) for handler execution.
+     *
+     * Problem: we need to clobber a register to load __stack_end,
+     * but we haven't saved anything yet. Solution: save x9 to
+     * TPIDR_EL1 (kernel scratch sysreg), switch SP, then save
+     * all regs including the real x9 from TPIDR_EL1. */
+    msr tpidr_el1, x9          /* stash x9 in kernel scratch reg */
+    ldr x9, =__stack_end
+    mov sp, x9
+
+    /* Allocate TrapFrame on the kernel stack */
+    sub sp, sp, #288
+
+    /* Save x0–x8 */
+    stp x0,  x1,  [sp, #0]
+    stp x2,  x3,  [sp, #16]
+    stp x4,  x5,  [sp, #32]
+    stp x6,  x7,  [sp, #48]
+    str x8,        [sp, #64]
+
+    /* Recover and save the REAL x9 from TPIDR_EL1 */
+    mrs x9, tpidr_el1
+    str x9, [sp, #72]
+
+    /* Save x10–x30 */
+    stp x10, x11, [sp, #80]
+    stp x12, x13, [sp, #96]
+    stp x14, x15, [sp, #112]
+    stp x16, x17, [sp, #128]
+    stp x18, x19, [sp, #144]
+    stp x20, x21, [sp, #160]
+    stp x22, x23, [sp, #176]
+    stp x24, x25, [sp, #192]
+    stp x26, x27, [sp, #208]
+    stp x28, x29, [sp, #224]
+    str x30,      [sp, #240]
+
+    /* Save SP_EL0 (user stack pointer) */
+    mrs x9, sp_el0
+    str x9, [sp, #248]
+
+    /* Save ELR_EL1 + SPSR_EL1 */
+    mrs x9,  elr_el1
+    mrs x10, spsr_el1
+    stp x9,  x10, [sp, #256]
+
+    /* x0 = pointer to TrapFrame for Rust handler */
+    mov x0, sp
+.endm
+.macro RESTORE_CONTEXT_LOWER
+    /* Restore ELR_EL1 + SPSR_EL1 */
+    ldp x9,  x10, [sp, #256]
+    msr elr_el1, x9
+    msr spsr_el1, x10
+
+    /* Restore SP_EL0 (user stack for the target task) */
+    ldr x9, [sp, #248]
+    msr sp_el0, x9
+
+    /* Restore x0–x30 */
+    ldp x0,  x1,  [sp, #0]
+    ldp x2,  x3,  [sp, #16]
+    ldp x4,  x5,  [sp, #32]
+    ldp x6,  x7,  [sp, #48]
+    ldp x8,  x9,  [sp, #64]
+    ldp x10, x11, [sp, #80]
+    ldp x12, x13, [sp, #96]
+    ldp x14, x15, [sp, #112]
+    ldp x16, x17, [sp, #128]
+    ldp x18, x19, [sp, #144]
+    ldp x20, x21, [sp, #160]
+    ldp x22, x23, [sp, #176]
+    ldp x24, x25, [sp, #192]
+    ldp x26, x27, [sp, #208]
+    ldp x28, x29, [sp, #224]
+    ldr x30,      [sp, #240]
+
+    /* Deallocate TrapFrame — SP now at kernel stack top (of OLD task) */
+    add sp, sp, #288
+
+    /* Return from exception */
     eret
 .endm
 
@@ -425,10 +529,10 @@ _exc_sync_cur_spx:
     RESTORE_CONTEXT
 
 _exc_sync_lower64:
-    SAVE_CONTEXT
+    SAVE_CONTEXT_LOWER
     mov x1, #2          /* source = 2: lower EL, AArch64 */
     bl  exception_dispatch_sync
-    RESTORE_CONTEXT
+    RESTORE_CONTEXT_LOWER
 
 /* ═══════════════════════════════════════════════════════════════════
  * IRQ handlers — save context, call Rust, restore
@@ -445,9 +549,9 @@ _exc_irq_cur_spx:
     RESTORE_CONTEXT
 
 _exc_irq_lower64:
-    SAVE_CONTEXT
+    SAVE_CONTEXT_LOWER
     bl  exception_dispatch_irq
-    RESTORE_CONTEXT
+    RESTORE_CONTEXT_LOWER
 
 /* ═══════════════════════════════════════════════════════════════════
  * FIQ / SError stub — halt safely
@@ -478,7 +582,7 @@ pub extern "C" fn exception_dispatch_sync(frame: &mut TrapFrame, source: u64) {
         0x15 => handle_svc(frame, esr),
         0x20 | 0x21 => handle_instruction_abort(frame, esr, source),
         0x24 | 0x25 => handle_data_abort(frame, esr, source),
-        0x07 => handle_fp_trap(frame, esr),
+        0x07 => handle_fp_trap(frame, esr, source),
         _ => handle_unknown(frame, esr, ec, source),
     }
 }
@@ -526,28 +630,71 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
         2 => crate::ipc::sys_recv(frame, frame.x[6] as usize),
         // SYS_CALL = 3: send + receive (ep_id in x6)
         3 => crate::ipc::sys_call(frame, frame.x[6] as usize),
+        // SYS_WRITE = 4: write buffer to UART (x0=buf, x1=len)
+        4 => handle_sys_write(frame),
         _ => {
             uart_print("!!! unknown syscall #");
             uart_print_hex(syscall_nr);
-            uart_print(" !!!\n");
+            uart_print(" — faulting task\n");
+            crate::sched::fault_current_task(frame);
         }
     }
 }
 
-/// Instruction Abort handler — print fault details, halt
+/// SYS_WRITE handler: write bytes to UART on behalf of EL0 task.
+/// x0 = pointer to buffer, x1 = length in bytes.
+/// Validates that the buffer pointer is in user-accessible memory.
+fn handle_sys_write(frame: &TrapFrame) {
+    let buf_ptr = frame.x[0] as usize;
+    let len = frame.x[1] as usize;
+
+    // Validate: max 256 bytes per write, non-zero length
+    if len == 0 || len > 256 {
+        return;
+    }
+
+    // Validate: buffer must be in the kernel image range (shared code/rodata)
+    // or in user stack range. For now, allow any address in the identity-mapped
+    // RAM region (0x4000_0000 – 0x4800_0000) since all tasks share address space.
+    let buf_end = buf_ptr.wrapping_add(len);
+    if buf_ptr < 0x4000_0000 || buf_end > 0x4800_0000 || buf_end < buf_ptr {
+        uart_print("!!! SYS_WRITE: bad pointer !!!\n");
+        return;
+    }
+
+    // Safe to read — copy bytes to UART
+    for i in 0..len {
+        let byte = unsafe { core::ptr::read_volatile((buf_ptr + i) as *const u8) };
+        crate::uart_write(byte);
+    }
+}
+
+/// Instruction Abort handler — fault task if from lower EL, halt if from same EL
 fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
 
     let ec = (esr >> 26) & 0x3F;
-    let ifsc = esr & 0x3F; // Instruction Fault Status Code
+    let ifsc = esr & 0x3F;
 
-    uart_print("\n!!! INSTRUCTION ABORT !!!\n");
+    uart_print("\n!!! INSTRUCTION ABORT !!!");
     if ec == 0x20 {
-        uart_print("  Source: lower EL\n");
-    } else {
-        uart_print("  Source: same EL\n");
+        // Lower EL (EL0 task) — recoverable fault
+        uart_print(" [EL0 task]\n");
+        uart_print("  IFSC: 0x");
+        uart_print_hex(ifsc);
+        print_fault_class(ifsc);
+        uart_print("\n  FAR:  0x");
+        uart_print_hex(far);
+        uart_print("\n  ELR:  0x");
+        uart_print_hex(frame.elr_el1);
+        uart_print("\n");
+        crate::sched::fault_current_task(frame);
+        return;
     }
+    // Same EL (kernel) — fatal, halt
+    uart_print(" [KERNEL]\n");
+    uart_print("  Source: same EL\n");
     uart_print("  IFSC: 0x");
     uart_print_hex(ifsc);
     print_fault_class(ifsc);
@@ -563,20 +710,38 @@ fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
-/// Data Abort handler — print fault details, halt
+/// Data Abort handler — fault task if from lower EL, halt if from same EL
 fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
 
     let ec = (esr >> 26) & 0x3F;
-    let dfsc = esr & 0x3F; // Data Fault Status Code
+    let dfsc = esr & 0x3F;
 
-    uart_print("\n!!! DATA ABORT !!!\n");
+    uart_print("\n!!! DATA ABORT !!!");
     if ec == 0x24 {
-        uart_print("  Source: lower EL\n");
-    } else {
-        uart_print("  Source: same EL\n");
+        // Lower EL (EL0 task) — recoverable fault
+        uart_print(" [EL0 task]\n");
+        uart_print("  DFSC: 0x");
+        uart_print_hex(dfsc);
+        print_fault_class(dfsc);
+        let wnr = (esr >> 6) & 1;
+        if wnr == 1 {
+            uart_print("\n  Access: WRITE");
+        } else {
+            uart_print("\n  Access: READ");
+        }
+        uart_print("\n  FAR:  0x");
+        uart_print_hex(far);
+        uart_print("\n  ELR:  0x");
+        uart_print_hex(frame.elr_el1);
+        uart_print("\n");
+        crate::sched::fault_current_task(frame);
+        return;
     }
+    // Same EL (kernel) — fatal, halt
+    uart_print(" [KERNEL]\n");
+    uart_print("  Source: same EL\n");
     uart_print("  DFSC: 0x");
     uart_print_hex(dfsc);
     print_fault_class(dfsc);
@@ -598,9 +763,21 @@ fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
-/// FP/SIMD trap — kernel should not use FP
-fn handle_fp_trap(_frame: &mut TrapFrame, esr: u64) {
-    uart_print("\n!!! FP/SIMD TRAP !!!\n");
+/// FP/SIMD trap — fault task if from lower EL, halt if from same EL
+fn handle_fp_trap(frame: &mut TrapFrame, esr: u64, source: u64) {
+    uart_print("\n!!! FP/SIMD TRAP !!!");
+    if source == 2 {
+        // Lower EL (EL0 task) — recoverable
+        uart_print(" [EL0 task]\n");
+        uart_print("  Task attempted FP/SIMD instruction.\n");
+        uart_print("  ESR: 0x");
+        uart_print_hex(esr);
+        uart_print("\n");
+        crate::sched::fault_current_task(frame);
+        return;
+    }
+    // Same EL (kernel) — fatal
+    uart_print(" [KERNEL]\n");
     uart_print("  Kernel code attempted FP instruction.\n");
     uart_print("  ESR: 0x");
     uart_print_hex(esr);
@@ -608,9 +785,24 @@ fn handle_fp_trap(_frame: &mut TrapFrame, esr: u64) {
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
-/// Unknown/unhandled exception class
+/// Unknown/unhandled exception class — fault task if from lower EL, halt if same EL
 fn handle_unknown(frame: &mut TrapFrame, esr: u64, ec: u64, source: u64) {
-    uart_print("\n!!! UNHANDLED EXCEPTION !!!\n");
+    uart_print("\n!!! UNHANDLED EXCEPTION !!!");
+    if source == 2 {
+        // Lower EL (EL0 task) — recoverable
+        uart_print(" [EL0 task]\n");
+        uart_print("  EC:   0x");
+        uart_print_hex(ec);
+        uart_print("\n  ESR:  0x");
+        uart_print_hex(esr);
+        uart_print("\n  ELR:  0x");
+        uart_print_hex(frame.elr_el1);
+        uart_print("\n");
+        crate::sched::fault_current_task(frame);
+        return;
+    }
+    // Same EL (kernel) — fatal
+    uart_print(" [KERNEL]\n");
     uart_print("  EC:   0x");
     uart_print_hex(ec);
     uart_print("\n  ESR:  0x");
@@ -927,6 +1119,35 @@ unsafe fn copy_message(from_task: usize, to_task: usize) {
     }
 }
 
+// ─── Fault cleanup ─────────────────────────────────────────────────
+
+/// Remove a faulted task from all IPC endpoint slots.
+/// If a partner was blocked waiting for this task, unblock the partner
+/// so it can be rescheduled (partner will retry IPC or find no match).
+pub fn cleanup_task(task_idx: usize) {
+    unsafe {
+        for i in 0..MAX_ENDPOINTS {
+            // If the faulted task was a pending sender, clear the slot
+            if ENDPOINTS[i].sender == Some(task_idx) {
+                ENDPOINTS[i].sender = None;
+            }
+
+            // If the faulted task was a pending receiver, clear the slot
+            if ENDPOINTS[i].receiver == Some(task_idx) {
+                ENDPOINTS[i].receiver = None;
+            }
+        }
+
+        // Also check: is any other task Blocked because it was waiting
+        // for a rendezvous with the faulted task? In synchronous IPC,
+        // a task blocks *on an endpoint*, not on a specific partner.
+        // So if partner is blocked on ep.sender/receiver, it stays blocked
+        // until another task does the complementary operation.
+        // This is correct for synchronous IPC — partner will be unblocked
+        // when the faulted task restarts and re-enters IPC.
+    }
+}
+
 ```
 
 ## File ./src\main.rs:
@@ -1040,6 +1261,28 @@ pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
     reply0
 }
 
+/// SYS_WRITE (syscall #4): write string to UART via kernel.
+/// buf = pointer to string data, len = byte count.
+/// Used by EL0 tasks that cannot access UART directly.
+#[inline(always)]
+pub fn syscall_write(buf: *const u8, len: usize) {
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") buf as u64,
+            in("x1") len as u64,
+            in("x7") 4u64, // SYS_WRITE
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// Print a string from EL0 via SYS_WRITE syscall
+#[inline(always)]
+pub fn user_print(s: &str) {
+    syscall_write(s.as_ptr(), s.len());
+}
+
 // ─── Task entry points ─────────────────────────────────────────────
 
 /// Task A (client): send "PING" on EP 0, receive reply
@@ -1047,7 +1290,7 @@ pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
 pub extern "C" fn task_a_entry() -> ! {
     loop {
         // Send PING (msg[0] = 0x50494E47 = "PING" in ASCII hex)
-        uart_print("A:PING ");
+        user_print("A:PING ");
         syscall_call(0, 0x50494E47, 0, 0, 0);
     }
 }
@@ -1058,7 +1301,7 @@ pub extern "C" fn task_b_entry() -> ! {
     loop {
         // Receive message
         let _msg = syscall_recv(0);
-        uart_print("B:PONG ");
+        user_print("B:PONG ");
         // Reply by sending back on same endpoint
         syscall_send(0, 0x504F4E47, 0, 0, 0); // "PONG"
     }
@@ -1099,11 +1342,11 @@ pub extern "C" fn kernel_main() -> ! {
     // Start timer: 10ms periodic tick (IRQ still masked — won't fire yet)
     timer::init(10);
 
-    uart_print("[AegisOS] bootstrapping into task_a...\n");
+    uart_print("[AegisOS] bootstrapping into task_a (EL0)...\n");
 
     // Bootstrap: load task_a context and eret into it — never returns.
-    // The eret restores SPSR with IRQ unmasked (0x345), so interrupts
-    // become active exactly when task_a starts executing.
+    // The eret restores SPSR = 0x000 (EL0t), dropping to user mode.
+    // SAVE_CONTEXT_LOWER reloads SP to __stack_end on every exception entry.
     sched::bootstrap();
 }
 
@@ -1149,7 +1392,13 @@ const ATTR_NORMAL_WB: u64 = 2 << 2;
 /// EL1 Read-Write, EL0 No Access
 const AP_RW_EL1: u64 = 0b00 << 6;
 /// EL1 Read-Only, EL0 No Access
+#[allow(dead_code)]
 const AP_RO_EL1: u64 = 0b10 << 6;
+/// EL1 Read-Write, EL0 Read-Write
+const AP_RW_EL0: u64 = 0b01 << 6;
+/// EL1 Read-Only, EL0 Read-Only
+#[allow(dead_code)]
+const AP_RO_EL0: u64 = 0b11 << 6;
 
 // Shareability (bits [9:8])
 #[allow(dead_code)]
@@ -1175,13 +1424,27 @@ const DEVICE_BLOCK: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | XN;
 const RAM_BLOCK: u64 = BLOCK | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF;
 
 /// Kernel code page: Normal WB, RO, executable, Inner Shareable, AF=1
+#[allow(dead_code)]
 const KERNEL_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL1 | SH_INNER | AF;
 
-/// Kernel rodata page: Normal WB, RO, non-executable, Inner Shareable, AF=1
-const KERNEL_RODATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL1 | SH_INNER | AF | XN;
+/// Kernel rodata page: Normal WB, RO (EL0+EL1), non-executable, Inner Shareable, AF=1
+/// Must be EL0-accessible because EL0 tasks reference string literals in .rodata
+const KERNEL_RODATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | XN;
 
 /// Kernel data/bss/stack page: Normal WB, RW, non-executable, Inner Shareable, AF=1
 const KERNEL_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF | XN;
+
+/// User data/stack page: Normal WB, RW (EL0+EL1), non-executable, Inner Shareable, AF=1
+const USER_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL0 | SH_INNER | AF | XN;
+
+/// User code page: Normal WB, RO (EL0+EL1), EL0-executable (UXN=0), PXN=1, Inner Shareable, AF=1
+/// PXN prevents kernel from executing user code; UXN=0 allows EL0 execution
+#[allow(dead_code)]
+const USER_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | PXN;
+
+/// Shared code page: Normal WB, RO (EL0+EL1), executable by both EL1 and EL0
+/// Used for .text section where kernel and task code coexist
+const SHARED_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF;
 
 // ─── MAIR / TCR constants ─────────────────────────────────────────
 
@@ -1237,6 +1500,10 @@ extern "C" {
     static __stack_end: u8;
     static __kernel_end: u8;
     static __page_tables_end: u8;
+    static __user_stacks_start: u8;
+    static __user_stacks_end: u8;
+    static __task_stacks_start: u8;
+    static __task_stacks_end: u8;
 }
 
 /// Get address of a linker symbol as usize
@@ -1312,20 +1579,28 @@ unsafe fn refine_kernel_pages() {
     let rodata_end = sym_addr(&__rodata_end);
     let data_start = sym_addr(&__data_start);
     let kernel_end = sym_addr(&__kernel_end);
+    let user_stacks_start = sym_addr(&__user_stacks_start);
+    let user_stacks_end = sym_addr(&__user_stacks_end);
 
     // Fill L3 table: 512 entries covering 0x4000_0000 – 0x401F_FFFF
     let base: usize = 0x4000_0000;
     for i in 0..512 {
         let pa = base + i * 4096;
 
-        let desc = if pa >= text_start && pa < text_end {
-            // Kernel code: RX (Read-Only, Executable)
-            (pa as u64) | KERNEL_CODE_PAGE
+        let desc = if pa >= user_stacks_start && pa < user_stacks_end {
+            // User stacks: RW, EL0-accessible, non-executable
+            (pa as u64) | USER_DATA_PAGE
+        } else if pa >= text_start && pa < text_end {
+            // Shared code (kernel + task): RO, executable by both EL1 and EL0
+            // Both PXN=0 and UXN=0 so kernel handlers and EL0 tasks can execute.
+            // AP = RO_EL0 (0b11) means both EL1 and EL0 can read.
+            // WXN is satisfied because pages are RO (not writable).
+            (pa as u64) | SHARED_CODE_PAGE
         } else if pa >= rodata_start && pa < rodata_end {
             // Read-only data: RO, non-executable
             (pa as u64) | KERNEL_RODATA_PAGE
         } else if pa >= data_start && pa < kernel_end {
-            // Data + BSS + page tables + stack: RW, non-executable
+            // Data + BSS + page tables + kernel stacks: RW, non-executable
             (pa as u64) | KERNEL_DATA_PAGE
         } else if pa < text_start {
             // Before kernel (DTB area etc): RW, non-executable
@@ -1396,12 +1671,13 @@ pub unsafe extern "C" fn mmu_get_config(out: *mut [u64; 4]) {
 /// Thời Khóa Biểu / Bộ lập lịch (Scheduler).
 /// AegisOS Scheduler — Round-Robin, 3 static tasks
 ///
-/// Tasks run at EL1 (same privilege as kernel). Each task has:
+/// Tasks run at EL0 (user mode). Each task has:
 ///   - A TrapFrame (saved/restored on context switch)
-///   - Its own 4KB kernel stack (in .task_stacks section)
+///   - Its own 4KB kernel stack (SP_EL1, in .task_stacks section)
+///   - Its own 4KB user stack (SP_EL0, in .user_stacks section)
 ///   - A state (Ready, Running, Inactive)
 ///
-/// Context switch: timer IRQ → save frame → pick next Ready → load frame → eret
+/// Context switch: timer IRQ → save frame → pick next Ready → switch SP_EL1 → load frame → eret to EL0
 
 use crate::exception::TrapFrame;
 use crate::uart_print;
@@ -1415,6 +1691,7 @@ pub enum TaskState {
     Ready    = 1,
     Running  = 2,
     Blocked  = 3,
+    Faulted  = 4,
 }
 
 // ─── Task Control Block ────────────────────────────────────────────
@@ -1425,7 +1702,10 @@ pub struct Tcb {
     pub context: TrapFrame,
     pub state: TaskState,
     pub id: u16,
-    pub stack_top: u64,  // top of this task's kernel stack (SP_EL1)
+    pub stack_top: u64,       // top of this task's kernel stack (SP_EL1)
+    pub entry_point: u64,     // original entry address (for restart)
+    pub user_stack_top: u64,  // original SP_EL0 top (for restart)
+    pub fault_tick: u64,      // tick when task was marked Faulted
 }
 
 // ─── Static task table ─────────────────────────────────────────────
@@ -1435,6 +1715,9 @@ const NUM_TASKS: usize = 3;
 
 static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
 static mut CURRENT: usize = 0;
+
+/// Delay before auto-restarting a faulted task (100 ticks × 10ms = 1 second)
+const RESTART_DELAY_TICKS: u64 = 100;
 
 const EMPTY_TCB: Tcb = Tcb {
     context: TrapFrame {
@@ -1447,6 +1730,9 @@ const EMPTY_TCB: Tcb = Tcb {
     state: TaskState::Inactive,
     id: 0,
     stack_top: 0,
+    entry_point: 0,
+    user_stack_top: 0,
+    fault_tick: 0,
 };
 
 // ─── Public API ────────────────────────────────────────────────────
@@ -1459,41 +1745,49 @@ pub fn init(
     idle_entry: u64,
 ) {
     extern "C" {
-        static __task_stacks_start: u8;
+        static __task_stacks_start: u8;  // kernel stacks (SP_EL1)
+        static __user_stacks_start: u8;  // user stacks (SP_EL0)
     }
 
-    let stacks_base = unsafe { &__task_stacks_start as *const u8 as u64 };
+    let kstacks_base = unsafe { &__task_stacks_start as *const u8 as u64 };
+    let ustacks_base = unsafe { &__user_stacks_start as *const u8 as u64 };
 
-    // Each task stack is 4KB. Stack grows downward, so top = base + (i+1)*4096
+    // Each stack is 4KB. Stack grows downward, so top = base + (i+1)*4096
+    // SPSR = 0x000 = EL0t: eret drops to EL0, uses SP_EL0
+    // When exception from EL0 → EL1, CPU automatically uses SP_EL1
     unsafe {
         // Task 0: task_a
         TCBS[0].id = 0;
         TCBS[0].state = TaskState::Ready;
-        TCBS[0].stack_top = stacks_base + 1 * 4096;
+        TCBS[0].stack_top = kstacks_base + 1 * 4096;
+        TCBS[0].entry_point = task_a_entry;
+        TCBS[0].user_stack_top = ustacks_base + 1 * 4096;
         TCBS[0].context.elr_el1 = task_a_entry;
-        TCBS[0].context.spsr_el1 = 0x345; // EL1h, IRQ unmasked (D=1, A=1, I=0, F=1)
-        // SP for task_a: use its own stack top (will be loaded via sp_el0 or SP_EL1)
-        // We store the stack top in x[29] (frame pointer) too for safety
-        TCBS[0].context.sp_el0 = stacks_base + 1 * 4096;
+        TCBS[0].context.spsr_el1 = 0x000; // EL0t
+        TCBS[0].context.sp_el0 = ustacks_base + 1 * 4096;
 
         // Task 1: task_b
         TCBS[1].id = 1;
         TCBS[1].state = TaskState::Ready;
-        TCBS[1].stack_top = stacks_base + 2 * 4096;
+        TCBS[1].stack_top = kstacks_base + 2 * 4096;
+        TCBS[1].entry_point = task_b_entry;
+        TCBS[1].user_stack_top = ustacks_base + 2 * 4096;
         TCBS[1].context.elr_el1 = task_b_entry;
-        TCBS[1].context.spsr_el1 = 0x345;
-        TCBS[1].context.sp_el0 = stacks_base + 2 * 4096;
+        TCBS[1].context.spsr_el1 = 0x000; // EL0t
+        TCBS[1].context.sp_el0 = ustacks_base + 2 * 4096;
 
         // Task 2: idle
         TCBS[2].id = 2;
         TCBS[2].state = TaskState::Ready;
-        TCBS[2].stack_top = stacks_base + 3 * 4096;
+        TCBS[2].stack_top = kstacks_base + 3 * 4096;
+        TCBS[2].entry_point = idle_entry;
+        TCBS[2].user_stack_top = ustacks_base + 3 * 4096;
         TCBS[2].context.elr_el1 = idle_entry;
-        TCBS[2].context.spsr_el1 = 0x345;
-        TCBS[2].context.sp_el0 = stacks_base + 3 * 4096;
+        TCBS[2].context.spsr_el1 = 0x000; // EL0t
+        TCBS[2].context.sp_el0 = ustacks_base + 3 * 4096;
     }
 
-    uart_print("[AegisOS] scheduler ready (3 tasks)\n");
+    uart_print("[AegisOS] scheduler ready (3 tasks, EL0)\n");
 }
 
 /// Schedule: save current context, pick next Ready task, load its context.
@@ -1502,21 +1796,34 @@ pub fn init(
 /// The trick: we modify `*frame` in-place. When the IRQ handler does
 /// RESTORE_CONTEXT, it restores the NEW task's registers, and `eret`
 /// jumps to the new task's ELR — completing the context switch.
+///
+/// SP_EL1 switching: We update CURRENT_KSTACK with the new task's kernel
+/// stack top. The RESTORE_CONTEXT_EL0 macro reads this and sets SP
+/// before eret, so the next exception from EL0 uses the correct stack.
 pub fn schedule(frame: &mut TrapFrame) {
     unsafe {
         let old = CURRENT;
 
         // Save current task's context from the TrapFrame
-        // Copy the entire frame into the TCB
         core::ptr::copy_nonoverlapping(
             frame as *const TrapFrame,
             &mut TCBS[old].context as *mut TrapFrame,
             1,
         );
 
-        // Mark old task as Ready (unless it's Blocked)
+        // Mark old task as Ready (unless it's Blocked or Faulted)
         if TCBS[old].state == TaskState::Running {
             TCBS[old].state = TaskState::Ready;
+        }
+
+        // Auto-restart: check if any Faulted task has waited long enough
+        let now = crate::timer::tick_count();
+        for i in 0..NUM_TASKS {
+            if TCBS[i].state == TaskState::Faulted
+                && now.wrapping_sub(TCBS[i].fault_tick) >= RESTART_DELAY_TICKS
+            {
+                restart_task(i);
+            }
         }
 
         // Round-robin: find next Ready task
@@ -1531,8 +1838,11 @@ pub fn schedule(frame: &mut TrapFrame) {
         }
 
         if !found {
-            // No ready task — stay on idle (index 2)
+            // No ready task — force-restart idle (index 2) if faulted
             next = 2;
+            if TCBS[2].state == TaskState::Faulted {
+                restart_task(2);
+            }
             TCBS[2].state = TaskState::Ready;
         }
 
@@ -1540,8 +1850,7 @@ pub fn schedule(frame: &mut TrapFrame) {
         TCBS[next].state = TaskState::Running;
         CURRENT = next;
 
-        // Load new task's context into the frame
-        // The assembly RESTORE_CONTEXT will pick up these values
+        // Load new task's context into the frame.
         core::ptr::copy_nonoverlapping(
             &TCBS[next].context as *const TrapFrame,
             frame as *mut TrapFrame,
@@ -1594,8 +1903,70 @@ pub fn load_frame(task_idx: usize, frame: &mut TrapFrame) {
     }
 }
 
-/// Bootstrap: load first task's context and jump to it.
-/// This never returns — it erets into task_a.
+/// Mark the currently running task as Faulted, cleanup IPC, and schedule away.
+/// Called from exception handlers when a lower-EL fault is recoverable.
+pub fn fault_current_task(frame: &mut TrapFrame) {
+    unsafe {
+        let current = CURRENT;
+        let id = TCBS[current].id;
+
+        uart_print("[AegisOS] TASK ");
+        crate::uart_print_hex(id as u64);
+        uart_print(" FAULTED\n");
+
+        TCBS[current].state = TaskState::Faulted;
+        TCBS[current].fault_tick = crate::timer::tick_count();
+
+        // Clean up IPC endpoints — unblock any partner waiting for this task
+        crate::ipc::cleanup_task(current);
+
+        // Schedule away to the next ready task
+        schedule(frame);
+    }
+}
+
+/// Restart a faulted task: zero context, reload entry point + stack, mark Ready.
+/// Called from schedule() when restart delay has elapsed.
+fn restart_task(task_idx: usize) {
+    unsafe {
+        if TCBS[task_idx].state != TaskState::Faulted {
+            return;
+        }
+
+        let id = TCBS[task_idx].id;
+
+        // Zero user stack (4KB) to prevent state leakage
+        let ustack_top = TCBS[task_idx].user_stack_top;
+        let ustack_base = (ustack_top - 4096) as *mut u8;
+        core::ptr::write_bytes(ustack_base, 0, 4096);
+
+        // Zero entire TrapFrame
+        core::ptr::write_bytes(
+            &mut TCBS[task_idx].context as *mut TrapFrame as *mut u8,
+            0,
+            core::mem::size_of::<TrapFrame>(),
+        );
+
+        // Reload entry point, stack, SPSR
+        TCBS[task_idx].context.elr_el1 = TCBS[task_idx].entry_point;
+        TCBS[task_idx].context.spsr_el1 = 0x000; // EL0t
+        TCBS[task_idx].context.sp_el0 = ustack_top;
+
+        TCBS[task_idx].state = TaskState::Ready;
+
+        uart_print("[AegisOS] TASK ");
+        crate::uart_print_hex(id as u64);
+        uart_print(" RESTARTED\n");
+    }
+}
+
+/// Bootstrap: load first task's context and eret into EL0.
+/// This never returns — it erets into task_a at EL0.
+///
+/// SPSR = 0x000 (EL0t) means eret drops to EL0 using SP_EL0.
+/// SP_EL1 stays at __stack_end (the shared kernel boot stack).
+/// SAVE_CONTEXT_LOWER reloads SP to __stack_end on every exception
+/// entry, so the bootstrap SP value doesn't matter after this point.
 pub fn bootstrap() -> ! {
     unsafe {
         TCBS[0].state = TaskState::Running;
@@ -1603,16 +1974,15 @@ pub fn bootstrap() -> ! {
 
         let frame = &TCBS[0].context;
 
-        // Load the task's context into registers and eret
+        // Load the task's context into registers and eret into EL0
         core::arch::asm!(
-            // Set ELR_EL1 and SPSR_EL1 for eret
+            // Set ELR_EL1 = task entry, SPSR_EL1 = 0x000 (EL0t)
             "msr elr_el1, {elr}",
             "msr spsr_el1, {spsr}",
+            // Set SP_EL0 = user stack (task will use this at EL0)
             "msr sp_el0, {sp0}",
-            // Set SP_EL1 for this task (for future exception entry)
-            // We can't directly write SP_EL1 while using it, so we
-            // just eret — the first timer IRQ will save onto bootstrap stack
-            // and schedule() will set sp_el1 properly
+            // eret: CPU restores PSTATE from SPSR (EL0t), PC from ELR.
+            // Task runs at EL0 with SP = SP_EL0 (user stack).
             "eret",
             elr = in(reg) frame.elr_el1,
             spsr = in(reg) frame.spsr_el1,
