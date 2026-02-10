@@ -1,0 +1,153 @@
+/// AegisOS IPC — Synchronous Endpoint-based messaging
+///
+/// Synchronous IPC: sender blocks until receiver is ready and vice versa.
+/// Message payload: x[0]..x[3] in TrapFrame (4 × u64 = 32 bytes).
+///
+/// Syscalls:
+///   SYS_SEND = 1: send message to endpoint (blocks if no receiver)
+///   SYS_RECV = 2: receive message from endpoint (blocks if no sender)
+///   SYS_CALL = 3: send + recv (client call pattern)
+
+use crate::exception::TrapFrame;
+use crate::sched::{self, TaskState};
+use crate::uart_print;
+
+// ─── Constants ─────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+pub const SYS_SEND: u64 = 1;
+#[allow(dead_code)]
+pub const SYS_RECV: u64 = 2;
+#[allow(dead_code)]
+pub const SYS_CALL: u64 = 3;
+
+const MAX_ENDPOINTS: usize = 2;
+const MSG_REGS: usize = 4; // x[0]..x[3]
+
+// ─── Endpoint ──────────────────────────────────────────────────────
+
+/// An IPC endpoint. One task can be waiting to send, one to receive.
+/// For simplicity: single-slot (one waiter per direction).
+struct Endpoint {
+    /// Task blocked waiting to send on this endpoint (None = no waiter)
+    sender: Option<usize>,
+    /// Task blocked waiting to receive on this endpoint (None = no waiter)
+    receiver: Option<usize>,
+}
+
+const EMPTY_EP: Endpoint = Endpoint {
+    sender: None,
+    receiver: None,
+};
+
+static mut ENDPOINTS: [Endpoint; MAX_ENDPOINTS] = [EMPTY_EP; MAX_ENDPOINTS];
+
+// ─── IPC operations ────────────────────────────────────────────────
+
+/// sys_send(frame, ep_id): send message on endpoint.
+/// Message payload: frame.x[0..4] → receiver's x[0..4].
+/// If a receiver is already waiting: deliver immediately, unblock receiver.
+/// Otherwise: block sender, enqueue, schedule away.
+pub fn sys_send(frame: &mut TrapFrame, ep_id: usize) {
+    if ep_id >= MAX_ENDPOINTS {
+        uart_print("!!! IPC: invalid endpoint\n");
+        return;
+    }
+
+    unsafe {
+        let current = sched::current_task_id() as usize;
+
+        // Save current frame to TCB so copy_message can read from it
+        sched::save_frame(current, frame);
+
+        if let Some(recv_task) = ENDPOINTS[ep_id].receiver.take() {
+            // Receiver is waiting — deliver message directly
+            copy_message(current, recv_task);
+
+            // Unblock receiver
+            sched::set_task_state(recv_task, TaskState::Ready);
+
+            // Sender continues (not blocked)
+        } else {
+            // No receiver — block sender and wait
+            ENDPOINTS[ep_id].sender = Some(current);
+            sched::set_task_state(current, TaskState::Blocked);
+            sched::schedule(frame);
+        }
+    }
+}
+
+/// sys_recv(frame, ep_id): receive message from endpoint.
+/// If a sender is already waiting: receive immediately, unblock sender.
+/// Otherwise: block receiver, enqueue, schedule away.
+pub fn sys_recv(frame: &mut TrapFrame, ep_id: usize) {
+    if ep_id >= MAX_ENDPOINTS {
+        uart_print("!!! IPC: invalid endpoint\n");
+        return;
+    }
+
+    unsafe {
+        let current = sched::current_task_id() as usize;
+
+        // Save current frame to TCB
+        sched::save_frame(current, frame);
+
+        if let Some(send_task) = ENDPOINTS[ep_id].sender.take() {
+            // Sender is waiting — receive message directly
+            copy_message(send_task, current);
+
+            // Unblock sender
+            sched::set_task_state(send_task, TaskState::Ready);
+
+            // Load received message back into our frame so caller sees it
+            sched::load_frame(current, frame);
+        } else {
+            // No sender — block receiver and wait
+            ENDPOINTS[ep_id].receiver = Some(current);
+            sched::set_task_state(current, TaskState::Blocked);
+            sched::schedule(frame);
+        }
+    }
+}
+
+/// sys_call(frame, ep_id): send message, then block to receive reply.
+/// Equivalent to send + recv atomically.
+pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
+    if ep_id >= MAX_ENDPOINTS {
+        uart_print("!!! IPC: invalid endpoint\n");
+        return;
+    }
+
+    unsafe {
+        let current = sched::current_task_id() as usize;
+
+        // Save current frame to TCB so message can be copied
+        sched::save_frame(current, frame);
+
+        if let Some(recv_task) = ENDPOINTS[ep_id].receiver.take() {
+            // Receiver is waiting — deliver message
+            copy_message(current, recv_task);
+            sched::set_task_state(recv_task, TaskState::Ready);
+
+            // Now block ourselves waiting for reply
+            ENDPOINTS[ep_id].receiver = Some(current);
+            sched::set_task_state(current, TaskState::Blocked);
+            sched::schedule(frame);
+        } else {
+            // No receiver — block as sender, will also need reply
+            ENDPOINTS[ep_id].sender = Some(current);
+            sched::set_task_state(current, TaskState::Blocked);
+            sched::schedule(frame);
+        }
+    }
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────
+
+/// Copy message registers x[0]..x[3] from sender's TCB to receiver's TCB.
+unsafe fn copy_message(from_task: usize, to_task: usize) {
+    for i in 0..MSG_REGS {
+        let val = sched::get_task_reg(from_task, i);
+        sched::set_task_reg(to_task, i, val);
+    }
+}

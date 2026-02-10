@@ -36,6 +36,12 @@ _start:
     movk x0, #0x30D0, lsl #16
     msr sctlr_el1, x0
 
+    /* Enable EL1 physical timer access from EL2 */
+    mrs x0, CNTHCTL_EL2
+    orr x0, x0, #3        /* EL1PCTEN + EL1PCEN */
+    msr CNTHCTL_EL2, x0
+    msr CNTVOFF_EL2, xzr  /* Zero virtual offset */
+
     /* Return to EL1h */
     mov x0, #0x3C5
     msr spsr_el2, x0

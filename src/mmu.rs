@@ -1,3 +1,4 @@
+/// Memory Management Unit (Bộ phận Quản lý Bộ nhớ).
 /// AegisOS MMU — AArch64 Page Table Setup
 ///
 /// Sub-phase 1: Identity map with 2 MiB blocks

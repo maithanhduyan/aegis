@@ -6,7 +6,7 @@ tools: ['execute/testFailure', 'read/problems', 'read/readFile', 'edit', 'search
 handoffs:
   - label: Start Implementation
     agent: agent
-    prompt: Start implementation - Bắt đầu triển khai kế hoạch đã tạo
+    prompt: Start implementation - Bắt đầu triển khai theo kế hoạch đã tạo
     send: true
   - label: Open in Editor
     agent: agent

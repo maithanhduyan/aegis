@@ -11,8 +11,12 @@
 └── src
     ├── boot.s
     ├── exception.rs
+    ├── gic.rs
+    ├── ipc.rs
     ├── main.rs
-    └── mmu.rs
+    ├── mmu.rs
+    ├── sched.rs
+    └── timer.rs
 ```
 
 # Danh sách chi tiết các file:
@@ -97,6 +101,14 @@ SECTIONS
     }
     __page_tables_end = .;
 
+    /* === Task Stacks (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    . = ALIGN(4096);
+    __task_stacks_start = .;
+    .task_stacks (NOLOAD) : {
+        . += 3 * 4096;
+    }
+    __task_stacks_end = .;
+
     /* === Stack Guard Page (4KB invalid — catches stack overflow) === */
     . = ALIGN(4096);
     __stack_guard = .;
@@ -163,6 +175,12 @@ _start:
     mov x0, #0x0800
     movk x0, #0x30D0, lsl #16
     msr sctlr_el1, x0
+
+    /* Enable EL1 physical timer access from EL2 */
+    mrs x0, CNTHCTL_EL2
+    orr x0, x0, #3        /* EL1PCTEN + EL1PCEN */
+    msr CNTHCTL_EL2, x0
+    msr CNTVOFF_EL2, xzr  /* Zero virtual offset */
 
     /* Return to EL1h */
     mov x0, #0x3C5
@@ -232,108 +250,403 @@ at_el1:
 ```rust
 /// AegisOS Exception Handling — AArch64
 ///
-/// Minimal exception vector table for catching Data Aborts, Instruction Aborts,
-/// and other synchronous exceptions. Prints fault info via UART then halts.
+/// Full context save/restore (288-byte TrapFrame), ESR_EL1 dispatch,
+/// separate Sync/IRQ paths. TrapFrame layout is ABI-fixed for Phase C.
 
 use crate::uart_print;
 use crate::uart_print_hex;
 
-// ─── Exception vector table (assembly) ─────────────────────────────
+// ─── TrapFrame: ABI-fixed layout, 288 bytes ────────────────────────
+
+/// Saved CPU context on exception entry.
+/// 36 × u64 = 288 bytes, 16-byte aligned.
+/// This layout is shared between Rust and assembly — DO NOT reorder.
+#[repr(C)]
+pub struct TrapFrame {
+    /// x0–x30 general-purpose registers (31 × 8 = 248 bytes)
+    pub x: [u64; 31],      // offset   0..248
+    /// Saved SP_EL0 (user stack pointer)
+    pub sp_el0: u64,        // offset 248
+    /// Saved ELR_EL1 (return address)
+    pub elr_el1: u64,       // offset 256
+    /// Saved SPSR_EL1 (saved processor state)
+    pub spsr_el1: u64,      // offset 264
+    /// Padding for 16-byte alignment
+    pub _pad: [u64; 2],     // offset 272..288
+}
+
+/// TrapFrame size — must match assembly
+#[allow(dead_code)]
+pub const TRAPFRAME_SIZE: usize = 288;
+
+// ─── Exception vector table + save/restore macros ──────────────────
 
 core::arch::global_asm!(r#"
 .section .text
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Save all registers into a TrapFrame on the current SP.
+ * After this macro: x0 = pointer to TrapFrame (= sp).
+ * ═══════════════════════════════════════════════════════════════════ */
+.macro SAVE_CONTEXT
+    /* Allocate TrapFrame on stack */
+    sub sp, sp, #288
+
+    /* Save x0–x30 in pairs */
+    stp x0,  x1,  [sp, #0]
+    stp x2,  x3,  [sp, #16]
+    stp x4,  x5,  [sp, #32]
+    stp x6,  x7,  [sp, #48]
+    stp x8,  x9,  [sp, #64]
+    stp x10, x11, [sp, #80]
+    stp x12, x13, [sp, #96]
+    stp x14, x15, [sp, #112]
+    stp x16, x17, [sp, #128]
+    stp x18, x19, [sp, #144]
+    stp x20, x21, [sp, #160]
+    stp x22, x23, [sp, #176]
+    stp x24, x25, [sp, #192]
+    stp x26, x27, [sp, #208]
+    stp x28, x29, [sp, #224]
+    str x30,      [sp, #240]
+
+    /* Save SP_EL0 */
+    mrs x9, sp_el0
+    str x9, [sp, #248]
+
+    /* Save ELR_EL1 + SPSR_EL1 */
+    mrs x9,  elr_el1
+    mrs x10, spsr_el1
+    stp x9,  x10, [sp, #256]
+
+    /* x0 = pointer to TrapFrame for Rust handler */
+    mov x0, sp
+.endm
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Restore all registers from a TrapFrame on the current SP, then eret.
+ * ═══════════════════════════════════════════════════════════════════ */
+.macro RESTORE_CONTEXT
+    /* Restore ELR_EL1 + SPSR_EL1 */
+    ldp x9,  x10, [sp, #256]
+    msr elr_el1, x9
+    msr spsr_el1, x10
+
+    /* Restore SP_EL0 */
+    ldr x9, [sp, #248]
+    msr sp_el0, x9
+
+    /* Restore x0–x30 */
+    ldp x0,  x1,  [sp, #0]
+    ldp x2,  x3,  [sp, #16]
+    ldp x4,  x5,  [sp, #32]
+    ldp x6,  x7,  [sp, #48]
+    ldp x8,  x9,  [sp, #64]
+    ldp x10, x11, [sp, #80]
+    ldp x12, x13, [sp, #96]
+    ldp x14, x15, [sp, #112]
+    ldp x16, x17, [sp, #128]
+    ldp x18, x19, [sp, #144]
+    ldp x20, x21, [sp, #160]
+    ldp x22, x23, [sp, #176]
+    ldp x24, x25, [sp, #192]
+    ldp x26, x27, [sp, #208]
+    ldp x28, x29, [sp, #224]
+    ldr x30,      [sp, #240]
+
+    /* Deallocate TrapFrame */
+    add sp, sp, #288
+
+    /* Return from exception — restores PC from ELR, PSTATE from SPSR */
+    eret
+.endm
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Exception Vector Table — 2048-byte aligned, 16 entries × 128 bytes
+ * ═══════════════════════════════════════════════════════════════════ */
 .balign 2048
 .global __exception_vectors
 __exception_vectors:
 
-// ─── Current EL with SP_EL0 ─────────────
+/* ─── Group 0: Current EL with SP_EL0 ─────────────────────────── */
 .balign 0x80
-    b   _sync_handler       // Synchronous
+    b   _exc_sync_cur_sp0       /* Synchronous */
 .balign 0x80
-    b   _unhandled           // IRQ
+    b   _exc_irq_cur_sp0        /* IRQ */
 .balign 0x80
-    b   _unhandled           // FIQ
+    b   _exc_fiq_stub           /* FIQ */
 .balign 0x80
-    b   _unhandled           // SError
+    b   _exc_serror_stub        /* SError */
 
-// ─── Current EL with SP_ELx ─────────────
+/* ─── Group 1: Current EL with SP_ELx ─────────────────────────── */
 .balign 0x80
-    b   _sync_handler       // Synchronous
+    b   _exc_sync_cur_spx       /* Synchronous */
 .balign 0x80
-    b   _unhandled           // IRQ
+    b   _exc_irq_cur_spx        /* IRQ */
 .balign 0x80
-    b   _unhandled           // FIQ
+    b   _exc_fiq_stub           /* FIQ */
 .balign 0x80
-    b   _unhandled           // SError
+    b   _exc_serror_stub        /* SError */
 
-// ─── Lower EL, AArch64 ─────────────────
+/* ─── Group 2: Lower EL, AArch64 ──────────────────────────────── */
 .balign 0x80
-    b   _sync_handler       // Synchronous
+    b   _exc_sync_lower64       /* Synchronous */
 .balign 0x80
-    b   _unhandled           // IRQ
+    b   _exc_irq_lower64        /* IRQ */
 .balign 0x80
-    b   _unhandled           // FIQ
+    b   _exc_fiq_stub           /* FIQ */
 .balign 0x80
-    b   _unhandled           // SError
+    b   _exc_serror_stub        /* SError */
 
-// ─── Lower EL, AArch32 ─────────────────
+/* ─── Group 3: Lower EL, AArch32 ──────────────────────────────── */
 .balign 0x80
-    b   _unhandled           // Synchronous
+    b   _exc_fiq_stub           /* Synchronous (AArch32 not used) */
 .balign 0x80
-    b   _unhandled           // IRQ
+    b   _exc_fiq_stub           /* IRQ */
 .balign 0x80
-    b   _unhandled           // FIQ
+    b   _exc_fiq_stub           /* FIQ */
 .balign 0x80
-    b   _unhandled           // SError
+    b   _exc_fiq_stub           /* SError */
 
-// ─── Handlers ───────────────────────────
+/* ═══════════════════════════════════════════════════════════════════
+ * Synchronous exception handlers — save context, call Rust, restore
+ * ═══════════════════════════════════════════════════════════════════ */
 
-_sync_handler:
-    // Save x0-x2, x30 on stack
-    stp x0, x1, [sp, #-16]!
-    stp x2, x30, [sp, #-16]!
+_exc_sync_cur_sp0:
+    SAVE_CONTEXT
+    mov x1, #0          /* source = 0: current EL, SP_EL0 */
+    bl  exception_dispatch_sync
+    RESTORE_CONTEXT
 
-    // Read ESR_EL1 and FAR_EL1
-    mrs x0, esr_el1
-    mrs x1, far_el1
-    mrs x2, elr_el1
-    bl  sync_exception_handler
+_exc_sync_cur_spx:
+    SAVE_CONTEXT
+    mov x1, #1          /* source = 1: current EL, SP_ELx */
+    bl  exception_dispatch_sync
+    RESTORE_CONTEXT
 
-    // Halt after exception
-    b   _unhandled
+_exc_sync_lower64:
+    SAVE_CONTEXT
+    mov x1, #2          /* source = 2: lower EL, AArch64 */
+    bl  exception_dispatch_sync
+    RESTORE_CONTEXT
 
-_unhandled:
+/* ═══════════════════════════════════════════════════════════════════
+ * IRQ handlers — save context, call Rust, restore
+ * ═══════════════════════════════════════════════════════════════════ */
+
+_exc_irq_cur_sp0:
+    SAVE_CONTEXT
+    bl  exception_dispatch_irq
+    RESTORE_CONTEXT
+
+_exc_irq_cur_spx:
+    SAVE_CONTEXT
+    bl  exception_dispatch_irq
+    RESTORE_CONTEXT
+
+_exc_irq_lower64:
+    SAVE_CONTEXT
+    bl  exception_dispatch_irq
+    RESTORE_CONTEXT
+
+/* ═══════════════════════════════════════════════════════════════════
+ * FIQ / SError stub — halt safely
+ * ═══════════════════════════════════════════════════════════════════ */
+
+_exc_fiq_stub:
     wfe
-    b   _unhandled
+    b   _exc_fiq_stub
+
+_exc_serror_stub:
+    SAVE_CONTEXT
+    bl  exception_dispatch_serror
+    b   _exc_fiq_stub       /* halt after SError */
 "#);
 
-// ─── Rust exception handler ────────────────────────────────────────
+// ─── Rust exception dispatch ───────────────────────────────────────
 
-/// Called from assembly vector table on synchronous exception
+/// Synchronous exception dispatch — called from assembly with TrapFrame pointer
+/// x0 = &mut TrapFrame, x1 = source (0=cur/SP_EL0, 1=cur/SP_ELx, 2=lower64)
 #[no_mangle]
-pub extern "C" fn sync_exception_handler(esr: u64, far: u64, elr: u64) {
-    let ec = (esr >> 26) & 0x3F; // Exception Class
+pub extern "C" fn exception_dispatch_sync(frame: &mut TrapFrame, source: u64) {
+    let esr: u64;
+    unsafe { core::arch::asm!("mrs {}, esr_el1", out(reg) esr, options(nomem, nostack)) };
 
-    uart_print("\n!!! EXCEPTION !!!\n");
+    let ec = (esr >> 26) & 0x3F;
 
     match ec {
-        0x20 => uart_print("  Type: Instruction Abort (lower EL)\n"),
-        0x21 => uart_print("  Type: Instruction Abort (same EL)\n"),
-        0x24 => uart_print("  Type: Data Abort (lower EL)\n"),
-        0x25 => uart_print("  Type: Data Abort (same EL)\n"),
-        0x15 => uart_print("  Type: SVC call\n"),
-        0x00 => uart_print("  Type: Unknown reason\n"),
-        _ => uart_print("  Type: Other\n"),
+        0x15 => handle_svc(frame, esr),
+        0x20 | 0x21 => handle_instruction_abort(frame, esr, source),
+        0x24 | 0x25 => handle_data_abort(frame, esr, source),
+        0x07 => handle_fp_trap(frame, esr),
+        _ => handle_unknown(frame, esr, ec, source),
+    }
+}
+
+/// IRQ dispatch — acknowledge GIC, dispatch by INTID, EOI
+#[no_mangle]
+pub extern "C" fn exception_dispatch_irq(frame: &mut TrapFrame) {
+    let intid = crate::gic::acknowledge();
+
+    if intid == crate::gic::INTID_SPURIOUS {
+        return; // spurious, ignore
     }
 
-    uart_print("  ESR_EL1: 0x");
-    uart_print_hex(esr);
-    uart_print("\n  FAR_EL1: 0x");
-    uart_print_hex(far);
-    uart_print("\n  ELR_EL1: 0x");
-    uart_print_hex(elr);
-    uart_print("\n  HALTED.\n");
+    match intid {
+        crate::timer::TIMER_INTID => crate::timer::tick_handler(frame),
+        _ => {
+            uart_print("!!! IRQ INTID=");
+            uart_print_hex(intid as u64);
+            uart_print(" (unhandled) !!!\n");
+        }
+    }
+
+    crate::gic::end_interrupt(intid);
 }
+
+/// SError dispatch — always fatal
+#[no_mangle]
+pub extern "C" fn exception_dispatch_serror(_frame: &mut TrapFrame) {
+    uart_print("\n!!! SERROR (fatal) !!!\n");
+    // Will halt in assembly stub after return
+}
+
+// ─── Individual exception handlers ─────────────────────────────────
+
+/// SVC handler — dispatch syscalls by x7
+fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
+    let syscall_nr = frame.x[7];
+
+    match syscall_nr {
+        // SYS_YIELD = 0: voluntarily yield CPU
+        0 => crate::sched::schedule(frame),
+        // SYS_SEND = 1: send IPC message (ep_id in x6)
+        1 => crate::ipc::sys_send(frame, frame.x[6] as usize),
+        // SYS_RECV = 2: receive IPC message (ep_id in x6)
+        2 => crate::ipc::sys_recv(frame, frame.x[6] as usize),
+        // SYS_CALL = 3: send + receive (ep_id in x6)
+        3 => crate::ipc::sys_call(frame, frame.x[6] as usize),
+        _ => {
+            uart_print("!!! unknown syscall #");
+            uart_print_hex(syscall_nr);
+            uart_print(" !!!\n");
+        }
+    }
+}
+
+/// Instruction Abort handler — print fault details, halt
+fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
+    let far: u64;
+    unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
+
+    let ec = (esr >> 26) & 0x3F;
+    let ifsc = esr & 0x3F; // Instruction Fault Status Code
+
+    uart_print("\n!!! INSTRUCTION ABORT !!!\n");
+    if ec == 0x20 {
+        uart_print("  Source: lower EL\n");
+    } else {
+        uart_print("  Source: same EL\n");
+    }
+    uart_print("  IFSC: 0x");
+    uart_print_hex(ifsc);
+    print_fault_class(ifsc);
+    uart_print("\n  ESR:  0x");
+    uart_print_hex(esr);
+    uart_print("\n  FAR:  0x");
+    uart_print_hex(far);
+    uart_print("\n  ELR:  0x");
+    uart_print_hex(frame.elr_el1);
+    uart_print("\n  src:  ");
+    uart_print_hex(source);
+    uart_print("\n  HALTED.\n");
+    loop { unsafe { core::arch::asm!("wfe") } }
+}
+
+/// Data Abort handler — print fault details, halt
+fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
+    let far: u64;
+    unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
+
+    let ec = (esr >> 26) & 0x3F;
+    let dfsc = esr & 0x3F; // Data Fault Status Code
+
+    uart_print("\n!!! DATA ABORT !!!\n");
+    if ec == 0x24 {
+        uart_print("  Source: lower EL\n");
+    } else {
+        uart_print("  Source: same EL\n");
+    }
+    uart_print("  DFSC: 0x");
+    uart_print_hex(dfsc);
+    print_fault_class(dfsc);
+    let wnr = (esr >> 6) & 1;
+    if wnr == 1 {
+        uart_print("\n  Access: WRITE");
+    } else {
+        uart_print("\n  Access: READ");
+    }
+    uart_print("\n  ESR:  0x");
+    uart_print_hex(esr);
+    uart_print("\n  FAR:  0x");
+    uart_print_hex(far);
+    uart_print("\n  ELR:  0x");
+    uart_print_hex(frame.elr_el1);
+    uart_print("\n  src:  ");
+    uart_print_hex(source);
+    uart_print("\n  HALTED.\n");
+    loop { unsafe { core::arch::asm!("wfe") } }
+}
+
+/// FP/SIMD trap — kernel should not use FP
+fn handle_fp_trap(_frame: &mut TrapFrame, esr: u64) {
+    uart_print("\n!!! FP/SIMD TRAP !!!\n");
+    uart_print("  Kernel code attempted FP instruction.\n");
+    uart_print("  ESR: 0x");
+    uart_print_hex(esr);
+    uart_print("\n  HALTED.\n");
+    loop { unsafe { core::arch::asm!("wfe") } }
+}
+
+/// Unknown/unhandled exception class
+fn handle_unknown(frame: &mut TrapFrame, esr: u64, ec: u64, source: u64) {
+    uart_print("\n!!! UNHANDLED EXCEPTION !!!\n");
+    uart_print("  EC:   0x");
+    uart_print_hex(ec);
+    uart_print("\n  ESR:  0x");
+    uart_print_hex(esr);
+    uart_print("\n  ELR:  0x");
+    uart_print_hex(frame.elr_el1);
+    uart_print("\n  src:  ");
+    uart_print_hex(source);
+    uart_print("\n  HALTED.\n");
+    loop { unsafe { core::arch::asm!("wfe") } }
+}
+
+/// Decode fault status code (DFSC/IFSC) bits [5:0] into human-readable class
+fn print_fault_class(fsc: u64) {
+    let level = fsc & 0x3;
+    match (fsc >> 2) & 0xF {
+        0b0001 => {
+            uart_print(" (Translation fault L");
+            uart_print_hex(level);
+            uart_print(")");
+        }
+        0b0010 => {
+            uart_print(" (Access flag fault L");
+            uart_print_hex(level);
+            uart_print(")");
+        }
+        0b0011 => {
+            uart_print(" (Permission fault L");
+            uart_print_hex(level);
+            uart_print(")");
+        }
+        _ => uart_print(" (other)"),
+    }
+}
+
+// ─── Init ──────────────────────────────────────────────────────────
 
 /// Install exception vector table — write VBAR_EL1
 pub fn init() {
@@ -353,6 +666,269 @@ pub fn init() {
 
 ```
 
+## File ./src\gic.rs:
+```rust
+/// Generic Interrupt Controller (Bộ điều khiển ngắt chung).
+/// AegisOS GICv2 Driver — Minimal interrupt controller
+///
+/// QEMU virt machine GICv2 addresses:
+///   GICD (Distributor):   0x0800_0000
+///   GICC (CPU Interface): 0x0801_0000
+use core::ptr;
+
+// ─── Base addresses ────────────────────────────────────────────────
+
+const GICD_BASE: usize = 0x0800_0000;
+const GICC_BASE: usize = 0x0801_0000;
+
+// ─── GICD register offsets ─────────────────────────────────────────
+
+const GICD_CTLR: usize = 0x000;
+const GICD_ISENABLER: usize = 0x100; // Set-enable (1 bit per INTID, registers of 32 bits)
+const GICD_IPRIORITYR: usize = 0x400; // Priority (1 byte per INTID)
+
+// ─── GICC register offsets ─────────────────────────────────────────
+
+const GICC_CTLR: usize = 0x000;
+const GICC_PMR: usize = 0x004;
+const GICC_IAR: usize = 0x00C;
+const GICC_EOIR: usize = 0x010;
+
+// ─── Helpers ───────────────────────────────────────────────────────
+
+#[inline(always)]
+fn gicd_write(offset: usize, val: u32) {
+    unsafe { ptr::write_volatile((GICD_BASE + offset) as *mut u32, val) }
+}
+
+#[inline(always)]
+fn gicd_read(offset: usize) -> u32 {
+    unsafe { ptr::read_volatile((GICD_BASE + offset) as *const u32) }
+}
+
+#[inline(always)]
+fn gicc_write(offset: usize, val: u32) {
+    unsafe { ptr::write_volatile((GICC_BASE + offset) as *mut u32, val) }
+}
+
+#[inline(always)]
+fn gicc_read(offset: usize) -> u32 {
+    unsafe { ptr::read_volatile((GICC_BASE + offset) as *const u32) }
+}
+
+#[inline(always)]
+fn gicd_write_byte(offset: usize, val: u8) {
+    unsafe { ptr::write_volatile((GICD_BASE + offset) as *mut u8, val) }
+}
+
+// ─── Public API ────────────────────────────────────────────────────
+
+/// Initialize GICv2: enable distributor + CPU interface, accept all priorities
+pub fn init() {
+    // 1. Disable distributor while configuring
+    gicd_write(GICD_CTLR, 0);
+
+    // 2. Enable distributor
+    gicd_write(GICD_CTLR, 1);
+
+    // 3. Set CPU interface: accept all priorities
+    gicc_write(GICC_PMR, 0xFF);
+
+    // 4. Enable CPU interface
+    gicc_write(GICC_CTLR, 1);
+}
+
+/// Enable a specific interrupt ID
+pub fn enable_intid(intid: u32) {
+    // GICD_ISENABLER[n]: each register covers 32 INTIDs
+    let reg_index = (intid / 32) as usize;
+    let bit = 1u32 << (intid % 32);
+    let offset = GICD_ISENABLER + reg_index * 4;
+
+    let val = gicd_read(offset);
+    gicd_write(offset, val | bit);
+}
+
+/// Set priority for a specific INTID (0 = highest, 0xFF = lowest)
+pub fn set_priority(intid: u32, priority: u8) {
+    // GICD_IPRIORITYR: 1 byte per INTID
+    let offset = GICD_IPRIORITYR + intid as usize;
+    gicd_write_byte(offset, priority);
+}
+
+/// Acknowledge IRQ — read GICC_IAR, returns INTID (1023 = spurious)
+pub fn acknowledge() -> u32 {
+    gicc_read(GICC_IAR) & 0x3FF // INTID is bits [9:0]
+}
+
+/// Signal End-Of-Interrupt for given INTID
+pub fn end_interrupt(intid: u32) {
+    gicc_write(GICC_EOIR, intid);
+}
+
+/// Spurious INTID constant
+pub const INTID_SPURIOUS: u32 = 1023;
+
+```
+
+## File ./src\ipc.rs:
+```rust
+/// AegisOS IPC — Synchronous Endpoint-based messaging
+///
+/// Synchronous IPC: sender blocks until receiver is ready and vice versa.
+/// Message payload: x[0]..x[3] in TrapFrame (4 × u64 = 32 bytes).
+///
+/// Syscalls:
+///   SYS_SEND = 1: send message to endpoint (blocks if no receiver)
+///   SYS_RECV = 2: receive message from endpoint (blocks if no sender)
+///   SYS_CALL = 3: send + recv (client call pattern)
+
+use crate::exception::TrapFrame;
+use crate::sched::{self, TaskState};
+use crate::uart_print;
+
+// ─── Constants ─────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+pub const SYS_SEND: u64 = 1;
+#[allow(dead_code)]
+pub const SYS_RECV: u64 = 2;
+#[allow(dead_code)]
+pub const SYS_CALL: u64 = 3;
+
+const MAX_ENDPOINTS: usize = 2;
+const MSG_REGS: usize = 4; // x[0]..x[3]
+
+// ─── Endpoint ──────────────────────────────────────────────────────
+
+/// An IPC endpoint. One task can be waiting to send, one to receive.
+/// For simplicity: single-slot (one waiter per direction).
+struct Endpoint {
+    /// Task blocked waiting to send on this endpoint (None = no waiter)
+    sender: Option<usize>,
+    /// Task blocked waiting to receive on this endpoint (None = no waiter)
+    receiver: Option<usize>,
+}
+
+const EMPTY_EP: Endpoint = Endpoint {
+    sender: None,
+    receiver: None,
+};
+
+static mut ENDPOINTS: [Endpoint; MAX_ENDPOINTS] = [EMPTY_EP; MAX_ENDPOINTS];
+
+// ─── IPC operations ────────────────────────────────────────────────
+
+/// sys_send(frame, ep_id): send message on endpoint.
+/// Message payload: frame.x[0..4] → receiver's x[0..4].
+/// If a receiver is already waiting: deliver immediately, unblock receiver.
+/// Otherwise: block sender, enqueue, schedule away.
+pub fn sys_send(frame: &mut TrapFrame, ep_id: usize) {
+    if ep_id >= MAX_ENDPOINTS {
+        uart_print("!!! IPC: invalid endpoint\n");
+        return;
+    }
+
+    unsafe {
+        let current = sched::current_task_id() as usize;
+
+        // Save current frame to TCB so copy_message can read from it
+        sched::save_frame(current, frame);
+
+        if let Some(recv_task) = ENDPOINTS[ep_id].receiver.take() {
+            // Receiver is waiting — deliver message directly
+            copy_message(current, recv_task);
+
+            // Unblock receiver
+            sched::set_task_state(recv_task, TaskState::Ready);
+
+            // Sender continues (not blocked)
+        } else {
+            // No receiver — block sender and wait
+            ENDPOINTS[ep_id].sender = Some(current);
+            sched::set_task_state(current, TaskState::Blocked);
+            sched::schedule(frame);
+        }
+    }
+}
+
+/// sys_recv(frame, ep_id): receive message from endpoint.
+/// If a sender is already waiting: receive immediately, unblock sender.
+/// Otherwise: block receiver, enqueue, schedule away.
+pub fn sys_recv(frame: &mut TrapFrame, ep_id: usize) {
+    if ep_id >= MAX_ENDPOINTS {
+        uart_print("!!! IPC: invalid endpoint\n");
+        return;
+    }
+
+    unsafe {
+        let current = sched::current_task_id() as usize;
+
+        // Save current frame to TCB
+        sched::save_frame(current, frame);
+
+        if let Some(send_task) = ENDPOINTS[ep_id].sender.take() {
+            // Sender is waiting — receive message directly
+            copy_message(send_task, current);
+
+            // Unblock sender
+            sched::set_task_state(send_task, TaskState::Ready);
+
+            // Load received message back into our frame so caller sees it
+            sched::load_frame(current, frame);
+        } else {
+            // No sender — block receiver and wait
+            ENDPOINTS[ep_id].receiver = Some(current);
+            sched::set_task_state(current, TaskState::Blocked);
+            sched::schedule(frame);
+        }
+    }
+}
+
+/// sys_call(frame, ep_id): send message, then block to receive reply.
+/// Equivalent to send + recv atomically.
+pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
+    if ep_id >= MAX_ENDPOINTS {
+        uart_print("!!! IPC: invalid endpoint\n");
+        return;
+    }
+
+    unsafe {
+        let current = sched::current_task_id() as usize;
+
+        // Save current frame to TCB so message can be copied
+        sched::save_frame(current, frame);
+
+        if let Some(recv_task) = ENDPOINTS[ep_id].receiver.take() {
+            // Receiver is waiting — deliver message
+            copy_message(current, recv_task);
+            sched::set_task_state(recv_task, TaskState::Ready);
+
+            // Now block ourselves waiting for reply
+            ENDPOINTS[ep_id].receiver = Some(current);
+            sched::set_task_state(current, TaskState::Blocked);
+            sched::schedule(frame);
+        } else {
+            // No receiver — block as sender, will also need reply
+            ENDPOINTS[ep_id].sender = Some(current);
+            sched::set_task_state(current, TaskState::Blocked);
+            sched::schedule(frame);
+        }
+    }
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────
+
+/// Copy message registers x[0]..x[3] from sender's TCB to receiver's TCB.
+unsafe fn copy_message(from_task: usize, to_task: usize) {
+    for i in 0..MSG_REGS {
+        let val = sched::get_task_reg(from_task, i);
+        sched::set_task_reg(to_task, i, val);
+    }
+}
+
+```
+
 ## File ./src\main.rs:
 ```rust
 #![no_std]
@@ -363,6 +939,10 @@ use core::ptr;
 
 mod mmu;
 mod exception;
+mod gic;
+mod timer;
+mod sched;
+mod ipc;
 
 // Boot assembly — inline vào binary thông qua global_asm!
 core::arch::global_asm!(include_str!("boot.s"));
@@ -370,7 +950,7 @@ core::arch::global_asm!(include_str!("boot.s"));
 /// UART0 PL011 data register trên QEMU virt machine
 const UART0: *mut u8 = 0x0900_0000 as *mut u8;
 
-fn uart_write(byte: u8) {
+pub fn uart_write(byte: u8) {
     unsafe { ptr::write_volatile(UART0, byte) }
 }
 
@@ -389,20 +969,142 @@ pub fn uart_print_hex(val: u64) {
     }
 }
 
+// ─── Syscall wrappers ──────────────────────────────────────────────
+
+/// SYS_YIELD (syscall #0): voluntarily yield the CPU to the next task.
+#[inline(always)]
+pub fn syscall_yield() {
+    unsafe {
+        core::arch::asm!(
+            "mov x7, #0",
+            "svc #0",
+            out("x7") _,
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// SYS_SEND (syscall #1): send message on endpoint.
+/// msg[0..4] in x0..x3, ep_id in x6, syscall# in x7.
+#[inline(always)]
+pub fn syscall_send(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) {
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") m0,
+            in("x1") m1,
+            in("x2") m2,
+            in("x3") m3,
+            in("x6") ep_id,
+            in("x7") 1u64, // SYS_SEND
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// SYS_RECV (syscall #2): receive message from endpoint.
+/// Returns msg[0] (first message word).
+#[inline(always)]
+pub fn syscall_recv(ep_id: u64) -> u64 {
+    let msg0: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x6") ep_id,
+            in("x7") 2u64, // SYS_RECV
+            lateout("x0") msg0,
+            options(nomem, nostack)
+        );
+    }
+    msg0
+}
+
+/// SYS_CALL (syscall #3): send message then wait for reply.
+/// Returns msg[0] from reply.
+#[inline(always)]
+pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
+    let reply0: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") m0,
+            in("x1") m1,
+            in("x2") m2,
+            in("x3") m3,
+            in("x6") ep_id,
+            in("x7") 3u64, // SYS_CALL
+            lateout("x0") reply0,
+            options(nomem, nostack)
+        );
+    }
+    reply0
+}
+
+// ─── Task entry points ─────────────────────────────────────────────
+
+/// Task A (client): send "PING" on EP 0, receive reply
+#[no_mangle]
+pub extern "C" fn task_a_entry() -> ! {
+    loop {
+        // Send PING (msg[0] = 0x50494E47 = "PING" in ASCII hex)
+        uart_print("A:PING ");
+        syscall_call(0, 0x50494E47, 0, 0, 0);
+    }
+}
+
+/// Task B (server): receive on EP 0, send PONG reply
+#[no_mangle]
+pub extern "C" fn task_b_entry() -> ! {
+    loop {
+        // Receive message
+        let _msg = syscall_recv(0);
+        uart_print("B:PONG ");
+        // Reply by sending back on same endpoint
+        syscall_send(0, 0x504F4E47, 0, 0, 0); // "PONG"
+    }
+}
+
+/// Idle task: just wfi in a loop
+#[no_mangle]
+pub extern "C" fn idle_entry() -> ! {
+    loop {
+        unsafe { core::arch::asm!("wfi"); }
+    }
+}
+
+// ─── Kernel main ───────────────────────────────────────────────────
+
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
-    // MMU was enabled by boot.s with W^X + guard page before we get here
     uart_print("\n[AegisOS] boot\n");
     uart_print("[AegisOS] MMU enabled (identity map)\n");
     uart_print("[AegisOS] W^X enforced (WXN + 4KB pages)\n");
 
     // Install exception vector table
     exception::init();
-    uart_print("[AegisOS] memory isolation active\n");
+    uart_print("[AegisOS] exceptions ready\n");
 
-    loop {
-        unsafe { core::arch::asm!("wfi") }
-    }
+    // Initialize GIC + enable timer interrupt
+    gic::init();
+    gic::set_priority(timer::TIMER_INTID, 0);
+    gic::enable_intid(timer::TIMER_INTID);
+
+    // Initialize scheduler with task entry points
+    sched::init(
+        task_a_entry as *const () as u64,
+        task_b_entry as *const () as u64,
+        idle_entry as *const () as u64,
+    );
+
+    // Start timer: 10ms periodic tick (IRQ still masked — won't fire yet)
+    timer::init(10);
+
+    uart_print("[AegisOS] bootstrapping into task_a...\n");
+
+    // Bootstrap: load task_a context and eret into it — never returns.
+    // The eret restores SPSR with IRQ unmasked (0x345), so interrupts
+    // become active exactly when task_a starts executing.
+    sched::bootstrap();
 }
 
 #[panic_handler]
@@ -415,6 +1117,7 @@ fn panic(_: &PanicInfo) -> ! {
 
 ## File ./src\mmu.rs:
 ```rust
+/// Memory Management Unit (Bộ phận Quản lý Bộ nhớ).
 /// AegisOS MMU — AArch64 Page Table Setup
 ///
 /// Sub-phase 1: Identity map with 2 MiB blocks
@@ -684,6 +1387,346 @@ pub unsafe extern "C" fn mmu_get_config(out: *mut [u64; 4]) {
     (*out)[1] = TCR_VALUE;
     (*out)[2] = l1 as u64; // TTBR0
     (*out)[3] = SCTLR_MMU_ON | SCTLR_WXN; // SCTLR bits to set
+}
+
+```
+
+## File ./src\sched.rs:
+```rust
+/// Thời Khóa Biểu / Bộ lập lịch (Scheduler).
+/// AegisOS Scheduler — Round-Robin, 3 static tasks
+///
+/// Tasks run at EL1 (same privilege as kernel). Each task has:
+///   - A TrapFrame (saved/restored on context switch)
+///   - Its own 4KB kernel stack (in .task_stacks section)
+///   - A state (Ready, Running, Inactive)
+///
+/// Context switch: timer IRQ → save frame → pick next Ready → load frame → eret
+
+use crate::exception::TrapFrame;
+use crate::uart_print;
+
+// ─── Task state ────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+#[repr(u8)]
+pub enum TaskState {
+    Inactive = 0,
+    Ready    = 1,
+    Running  = 2,
+    Blocked  = 3,
+}
+
+// ─── Task Control Block ────────────────────────────────────────────
+
+/// TCB — one per task. Context is saved/loaded during context switch.
+#[repr(C)]
+pub struct Tcb {
+    pub context: TrapFrame,
+    pub state: TaskState,
+    pub id: u16,
+    pub stack_top: u64,  // top of this task's kernel stack (SP_EL1)
+}
+
+// ─── Static task table ─────────────────────────────────────────────
+
+/// 3 tasks: 0 = task_a, 1 = task_b, 2 = idle
+const NUM_TASKS: usize = 3;
+
+static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
+static mut CURRENT: usize = 0;
+
+const EMPTY_TCB: Tcb = Tcb {
+    context: TrapFrame {
+        x: [0; 31],
+        sp_el0: 0,
+        elr_el1: 0,
+        spsr_el1: 0,
+        _pad: [0; 2],
+    },
+    state: TaskState::Inactive,
+    id: 0,
+    stack_top: 0,
+};
+
+// ─── Public API ────────────────────────────────────────────────────
+
+/// Initialize scheduler: set up TCBs for task_a, task_b, idle.
+/// Must be called before enabling timer interrupts.
+pub fn init(
+    task_a_entry: u64,
+    task_b_entry: u64,
+    idle_entry: u64,
+) {
+    extern "C" {
+        static __task_stacks_start: u8;
+    }
+
+    let stacks_base = unsafe { &__task_stacks_start as *const u8 as u64 };
+
+    // Each task stack is 4KB. Stack grows downward, so top = base + (i+1)*4096
+    unsafe {
+        // Task 0: task_a
+        TCBS[0].id = 0;
+        TCBS[0].state = TaskState::Ready;
+        TCBS[0].stack_top = stacks_base + 1 * 4096;
+        TCBS[0].context.elr_el1 = task_a_entry;
+        TCBS[0].context.spsr_el1 = 0x345; // EL1h, IRQ unmasked (D=1, A=1, I=0, F=1)
+        // SP for task_a: use its own stack top (will be loaded via sp_el0 or SP_EL1)
+        // We store the stack top in x[29] (frame pointer) too for safety
+        TCBS[0].context.sp_el0 = stacks_base + 1 * 4096;
+
+        // Task 1: task_b
+        TCBS[1].id = 1;
+        TCBS[1].state = TaskState::Ready;
+        TCBS[1].stack_top = stacks_base + 2 * 4096;
+        TCBS[1].context.elr_el1 = task_b_entry;
+        TCBS[1].context.spsr_el1 = 0x345;
+        TCBS[1].context.sp_el0 = stacks_base + 2 * 4096;
+
+        // Task 2: idle
+        TCBS[2].id = 2;
+        TCBS[2].state = TaskState::Ready;
+        TCBS[2].stack_top = stacks_base + 3 * 4096;
+        TCBS[2].context.elr_el1 = idle_entry;
+        TCBS[2].context.spsr_el1 = 0x345;
+        TCBS[2].context.sp_el0 = stacks_base + 3 * 4096;
+    }
+
+    uart_print("[AegisOS] scheduler ready (3 tasks)\n");
+}
+
+/// Schedule: save current context, pick next Ready task, load its context.
+/// Called from timer IRQ handler with the current TrapFrame.
+///
+/// The trick: we modify `*frame` in-place. When the IRQ handler does
+/// RESTORE_CONTEXT, it restores the NEW task's registers, and `eret`
+/// jumps to the new task's ELR — completing the context switch.
+pub fn schedule(frame: &mut TrapFrame) {
+    unsafe {
+        let old = CURRENT;
+
+        // Save current task's context from the TrapFrame
+        // Copy the entire frame into the TCB
+        core::ptr::copy_nonoverlapping(
+            frame as *const TrapFrame,
+            &mut TCBS[old].context as *mut TrapFrame,
+            1,
+        );
+
+        // Mark old task as Ready (unless it's Blocked)
+        if TCBS[old].state == TaskState::Running {
+            TCBS[old].state = TaskState::Ready;
+        }
+
+        // Round-robin: find next Ready task
+        let mut next = (old + 1) % NUM_TASKS;
+        let mut found = false;
+        for _ in 0..NUM_TASKS {
+            if TCBS[next].state == TaskState::Ready {
+                found = true;
+                break;
+            }
+            next = (next + 1) % NUM_TASKS;
+        }
+
+        if !found {
+            // No ready task — stay on idle (index 2)
+            next = 2;
+            TCBS[2].state = TaskState::Ready;
+        }
+
+        // Switch to new task
+        TCBS[next].state = TaskState::Running;
+        CURRENT = next;
+
+        // Load new task's context into the frame
+        // The assembly RESTORE_CONTEXT will pick up these values
+        core::ptr::copy_nonoverlapping(
+            &TCBS[next].context as *const TrapFrame,
+            frame as *mut TrapFrame,
+            1,
+        );
+    }
+}
+
+/// Get current task ID
+pub fn current_task_id() -> u16 {
+    unsafe { TCBS[CURRENT].id }
+}
+
+/// Set task state (used by IPC to block/unblock tasks)
+pub fn set_task_state(task_idx: usize, state: TaskState) {
+    if task_idx < NUM_TASKS {
+        unsafe { TCBS[task_idx].state = state; }
+    }
+}
+
+/// Get a register value from a task's saved context
+pub fn get_task_reg(task_idx: usize, reg: usize) -> u64 {
+    unsafe { TCBS[task_idx].context.x[reg] }
+}
+
+/// Set a register value in a task's saved context
+pub fn set_task_reg(task_idx: usize, reg: usize, val: u64) {
+    unsafe { TCBS[task_idx].context.x[reg] = val; }
+}
+
+/// Save the current TrapFrame into a task's TCB context
+pub fn save_frame(task_idx: usize, frame: &TrapFrame) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            frame as *const TrapFrame,
+            &mut TCBS[task_idx].context as *mut TrapFrame,
+            1,
+        );
+    }
+}
+
+/// Load a task's TCB context into the TrapFrame
+pub fn load_frame(task_idx: usize, frame: &mut TrapFrame) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &TCBS[task_idx].context as *const TrapFrame,
+            frame as *mut TrapFrame,
+            1,
+        );
+    }
+}
+
+/// Bootstrap: load first task's context and jump to it.
+/// This never returns — it erets into task_a.
+pub fn bootstrap() -> ! {
+    unsafe {
+        TCBS[0].state = TaskState::Running;
+        CURRENT = 0;
+
+        let frame = &TCBS[0].context;
+
+        // Load the task's context into registers and eret
+        core::arch::asm!(
+            // Set ELR_EL1 and SPSR_EL1 for eret
+            "msr elr_el1, {elr}",
+            "msr spsr_el1, {spsr}",
+            "msr sp_el0, {sp0}",
+            // Set SP_EL1 for this task (for future exception entry)
+            // We can't directly write SP_EL1 while using it, so we
+            // just eret — the first timer IRQ will save onto bootstrap stack
+            // and schedule() will set sp_el1 properly
+            "eret",
+            elr = in(reg) frame.elr_el1,
+            spsr = in(reg) frame.spsr_el1,
+            sp0 = in(reg) frame.sp_el0,
+            options(noreturn)
+        );
+    }
+}
+
+```
+
+## File ./src\timer.rs:
+```rust
+/// Đồng hồ hệ thống (Timer)
+/// AegisOS Timer — ARM Generic Timer (CNTP_EL0)
+///
+/// Uses the EL1 Physical Timer (CNTP) with PPI INTID 30.
+/// QEMU virt timer frequency: 62,500,000 Hz (62.5 MHz).
+
+use crate::uart_print;
+
+/// GIC INTID for EL1 Physical Timer (PPI 14)
+pub const TIMER_INTID: u32 = 30;
+
+/// Tick interval in ticks (computed at init)
+static mut TICK_INTERVAL: u64 = 0;
+
+/// Monotonic tick counter
+static mut TICK_COUNT: u64 = 0;
+
+/// Initialize timer for periodic ticks
+/// `tick_ms` = interval in milliseconds (e.g., 10 for 10ms)
+pub fn init(tick_ms: u32) {
+    let freq: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, CNTFRQ_EL0", out(reg) freq, options(nomem, nostack));
+    }
+
+    let ticks = freq * (tick_ms as u64) / 1000;
+    unsafe { TICK_INTERVAL = ticks; }
+
+    // Set countdown value
+    unsafe {
+        core::arch::asm!(
+            "msr CNTP_TVAL_EL0, {t}",
+            t = in(reg) ticks,
+            options(nomem, nostack)
+        );
+    }
+
+    // Enable timer, unmask interrupt (ENABLE=1, IMASK=0)
+    unsafe {
+        core::arch::asm!(
+            "mov x0, #1",
+            "msr CNTP_CTL_EL0, x0",
+            out("x0") _,
+            options(nomem, nostack)
+        );
+    }
+
+    uart_print("[AegisOS] timer started (");
+    // Print tick_ms as simple decimal
+    print_decimal(tick_ms);
+    uart_print("ms, freq=");
+    print_decimal(freq as u32 / 1_000_000);
+    uart_print("MHz)\n");
+}
+
+/// Re-arm timer — call from IRQ handler
+pub fn rearm() {
+    let ticks = unsafe { TICK_INTERVAL };
+    unsafe {
+        core::arch::asm!(
+            "msr CNTP_TVAL_EL0, {t}",
+            t = in(reg) ticks,
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// Timer tick handler — called from IRQ dispatch with TrapFrame
+pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
+    unsafe { TICK_COUNT += 1; }
+
+    // Re-arm for next tick
+    rearm();
+
+    // Context switch via scheduler
+    crate::sched::schedule(frame);
+}
+
+/// Get current tick count
+#[allow(dead_code)]
+pub fn tick_count() -> u64 {
+    unsafe { TICK_COUNT }
+}
+
+/// Simple decimal printer for small numbers
+fn print_decimal(mut val: u32) {
+    if val == 0 {
+        crate::uart_write(b'0');
+        return;
+    }
+    let mut buf = [0u8; 10];
+    let mut i = 0;
+    while val > 0 {
+        buf[i] = b'0' + (val % 10) as u8;
+        val /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        crate::uart_write(buf[i]);
+    }
 }
 
 ```

@@ -41,6 +41,14 @@ SECTIONS
     }
     __page_tables_end = .;
 
+    /* === Task Stacks (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    . = ALIGN(4096);
+    __task_stacks_start = .;
+    .task_stacks (NOLOAD) : {
+        . += 3 * 4096;
+    }
+    __task_stacks_end = .;
+
     /* === Stack Guard Page (4KB invalid — catches stack overflow) === */
     . = ALIGN(4096);
     __stack_guard = .;
