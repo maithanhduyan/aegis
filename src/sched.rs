@@ -1,12 +1,13 @@
 /// Thời Khóa Biểu / Bộ lập lịch (Scheduler).
 /// AegisOS Scheduler — Round-Robin, 3 static tasks
 ///
-/// Tasks run at EL1 (same privilege as kernel). Each task has:
+/// Tasks run at EL0 (user mode). Each task has:
 ///   - A TrapFrame (saved/restored on context switch)
-///   - Its own 4KB kernel stack (in .task_stacks section)
+///   - Its own 4KB kernel stack (SP_EL1, in .task_stacks section)
+///   - Its own 4KB user stack (SP_EL0, in .user_stacks section)
 ///   - A state (Ready, Running, Inactive)
 ///
-/// Context switch: timer IRQ → save frame → pick next Ready → load frame → eret
+/// Context switch: timer IRQ → save frame → pick next Ready → switch SP_EL1 → load frame → eret to EL0
 
 use crate::exception::TrapFrame;
 use crate::uart_print;
@@ -64,41 +65,43 @@ pub fn init(
     idle_entry: u64,
 ) {
     extern "C" {
-        static __task_stacks_start: u8;
+        static __task_stacks_start: u8;  // kernel stacks (SP_EL1)
+        static __user_stacks_start: u8;  // user stacks (SP_EL0)
     }
 
-    let stacks_base = unsafe { &__task_stacks_start as *const u8 as u64 };
+    let kstacks_base = unsafe { &__task_stacks_start as *const u8 as u64 };
+    let ustacks_base = unsafe { &__user_stacks_start as *const u8 as u64 };
 
-    // Each task stack is 4KB. Stack grows downward, so top = base + (i+1)*4096
+    // Each stack is 4KB. Stack grows downward, so top = base + (i+1)*4096
+    // SPSR = 0x000 = EL0t: eret drops to EL0, uses SP_EL0
+    // When exception from EL0 → EL1, CPU automatically uses SP_EL1
     unsafe {
         // Task 0: task_a
         TCBS[0].id = 0;
         TCBS[0].state = TaskState::Ready;
-        TCBS[0].stack_top = stacks_base + 1 * 4096;
+        TCBS[0].stack_top = kstacks_base + 1 * 4096; // kernel stack (SP_EL1)
         TCBS[0].context.elr_el1 = task_a_entry;
-        TCBS[0].context.spsr_el1 = 0x345; // EL1h, IRQ unmasked (D=1, A=1, I=0, F=1)
-        // SP for task_a: use its own stack top (will be loaded via sp_el0 or SP_EL1)
-        // We store the stack top in x[29] (frame pointer) too for safety
-        TCBS[0].context.sp_el0 = stacks_base + 1 * 4096;
+        TCBS[0].context.spsr_el1 = 0x000; // EL0t — run at EL0
+        TCBS[0].context.sp_el0 = ustacks_base + 1 * 4096; // user stack (SP_EL0)
 
         // Task 1: task_b
         TCBS[1].id = 1;
         TCBS[1].state = TaskState::Ready;
-        TCBS[1].stack_top = stacks_base + 2 * 4096;
+        TCBS[1].stack_top = kstacks_base + 2 * 4096; // kernel stack
         TCBS[1].context.elr_el1 = task_b_entry;
-        TCBS[1].context.spsr_el1 = 0x345;
-        TCBS[1].context.sp_el0 = stacks_base + 2 * 4096;
+        TCBS[1].context.spsr_el1 = 0x000; // EL0t
+        TCBS[1].context.sp_el0 = ustacks_base + 2 * 4096; // user stack
 
         // Task 2: idle
         TCBS[2].id = 2;
         TCBS[2].state = TaskState::Ready;
-        TCBS[2].stack_top = stacks_base + 3 * 4096;
+        TCBS[2].stack_top = kstacks_base + 3 * 4096; // kernel stack
         TCBS[2].context.elr_el1 = idle_entry;
-        TCBS[2].context.spsr_el1 = 0x345;
-        TCBS[2].context.sp_el0 = stacks_base + 3 * 4096;
+        TCBS[2].context.spsr_el1 = 0x000; // EL0t
+        TCBS[2].context.sp_el0 = ustacks_base + 3 * 4096; // user stack
     }
 
-    uart_print("[AegisOS] scheduler ready (3 tasks)\n");
+    uart_print("[AegisOS] scheduler ready (3 tasks, EL0)\n");
 }
 
 /// Schedule: save current context, pick next Ready task, load its context.
@@ -107,12 +110,15 @@ pub fn init(
 /// The trick: we modify `*frame` in-place. When the IRQ handler does
 /// RESTORE_CONTEXT, it restores the NEW task's registers, and `eret`
 /// jumps to the new task's ELR — completing the context switch.
+///
+/// SP_EL1 switching: We update CURRENT_KSTACK with the new task's kernel
+/// stack top. The RESTORE_CONTEXT_EL0 macro reads this and sets SP
+/// before eret, so the next exception from EL0 uses the correct stack.
 pub fn schedule(frame: &mut TrapFrame) {
     unsafe {
         let old = CURRENT;
 
         // Save current task's context from the TrapFrame
-        // Copy the entire frame into the TCB
         core::ptr::copy_nonoverlapping(
             frame as *const TrapFrame,
             &mut TCBS[old].context as *mut TrapFrame,
@@ -145,8 +151,11 @@ pub fn schedule(frame: &mut TrapFrame) {
         TCBS[next].state = TaskState::Running;
         CURRENT = next;
 
-        // Load new task's context into the frame
-        // The assembly RESTORE_CONTEXT will pick up these values
+        // Load new task's context into the frame.
+        // SAVE_CONTEXT_LOWER always uses the shared kernel boot stack,
+        // so RESTORE_CONTEXT_LOWER just pops the frame and erets.
+        // The TrapFrame's sp_el0 and spsr_el1 ensure eret lands at
+        // the correct EL0 task with the correct user stack.
         core::ptr::copy_nonoverlapping(
             &TCBS[next].context as *const TrapFrame,
             frame as *mut TrapFrame,
@@ -199,8 +208,13 @@ pub fn load_frame(task_idx: usize, frame: &mut TrapFrame) {
     }
 }
 
-/// Bootstrap: load first task's context and jump to it.
-/// This never returns — it erets into task_a.
+/// Bootstrap: load first task's context and eret into EL0.
+/// This never returns — it erets into task_a at EL0.
+///
+/// SPSR = 0x000 (EL0t) means eret drops to EL0 using SP_EL0.
+/// SP_EL1 stays at __stack_end (the shared kernel boot stack).
+/// SAVE_CONTEXT_LOWER reloads SP to __stack_end on every exception
+/// entry, so the bootstrap SP value doesn't matter after this point.
 pub fn bootstrap() -> ! {
     unsafe {
         TCBS[0].state = TaskState::Running;
@@ -208,16 +222,15 @@ pub fn bootstrap() -> ! {
 
         let frame = &TCBS[0].context;
 
-        // Load the task's context into registers and eret
+        // Load the task's context into registers and eret into EL0
         core::arch::asm!(
-            // Set ELR_EL1 and SPSR_EL1 for eret
+            // Set ELR_EL1 = task entry, SPSR_EL1 = 0x000 (EL0t)
             "msr elr_el1, {elr}",
             "msr spsr_el1, {spsr}",
+            // Set SP_EL0 = user stack (task will use this at EL0)
             "msr sp_el0, {sp0}",
-            // Set SP_EL1 for this task (for future exception entry)
-            // We can't directly write SP_EL1 while using it, so we
-            // just eret — the first timer IRQ will save onto bootstrap stack
-            // and schedule() will set sp_el1 properly
+            // eret: CPU restores PSTATE from SPSR (EL0t), PC from ELR.
+            // Task runs at EL0 with SP = SP_EL0 (user stack).
             "eret",
             elr = in(reg) frame.elr_el1,
             spsr = in(reg) frame.spsr_el1,

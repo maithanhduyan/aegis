@@ -75,6 +75,7 @@ core::arch::global_asm!(r#"
 
 /* ═══════════════════════════════════════════════════════════════════
  * Restore all registers from a TrapFrame on the current SP, then eret.
+ * Used for same-EL exceptions (SP stays the same).
  * ═══════════════════════════════════════════════════════════════════ */
 .macro RESTORE_CONTEXT
     /* Restore ELR_EL1 + SPSR_EL1 */
@@ -108,6 +109,99 @@ core::arch::global_asm!(r#"
     add sp, sp, #288
 
     /* Return from exception — restores PC from ELR, PSTATE from SPSR */
+    eret
+.endm
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Save context for lower-EL (EL0→EL1) exceptions.
+ * Load SP from the kernel boot stack top before saving, so all
+ * exception handling uses the shared 16KB kernel stack regardless
+ * of which task was running. Single-core, no nesting.
+ * ═══════════════════════════════════════════════════════════════════ */
+.macro SAVE_CONTEXT_LOWER
+    /* When exception fires from EL0, CPU sets SP = SP_EL1 (whatever
+     * it was when we last eret'd). We must switch to the shared kernel
+     * boot stack (__stack_end) for handler execution.
+     *
+     * Problem: we need to clobber a register to load __stack_end,
+     * but we haven't saved anything yet. Solution: save x9 to
+     * TPIDR_EL1 (kernel scratch sysreg), switch SP, then save
+     * all regs including the real x9 from TPIDR_EL1. */
+    msr tpidr_el1, x9          /* stash x9 in kernel scratch reg */
+    ldr x9, =__stack_end
+    mov sp, x9
+
+    /* Allocate TrapFrame on the kernel stack */
+    sub sp, sp, #288
+
+    /* Save x0–x8 */
+    stp x0,  x1,  [sp, #0]
+    stp x2,  x3,  [sp, #16]
+    stp x4,  x5,  [sp, #32]
+    stp x6,  x7,  [sp, #48]
+    str x8,        [sp, #64]
+
+    /* Recover and save the REAL x9 from TPIDR_EL1 */
+    mrs x9, tpidr_el1
+    str x9, [sp, #72]
+
+    /* Save x10–x30 */
+    stp x10, x11, [sp, #80]
+    stp x12, x13, [sp, #96]
+    stp x14, x15, [sp, #112]
+    stp x16, x17, [sp, #128]
+    stp x18, x19, [sp, #144]
+    stp x20, x21, [sp, #160]
+    stp x22, x23, [sp, #176]
+    stp x24, x25, [sp, #192]
+    stp x26, x27, [sp, #208]
+    stp x28, x29, [sp, #224]
+    str x30,      [sp, #240]
+
+    /* Save SP_EL0 (user stack pointer) */
+    mrs x9, sp_el0
+    str x9, [sp, #248]
+
+    /* Save ELR_EL1 + SPSR_EL1 */
+    mrs x9,  elr_el1
+    mrs x10, spsr_el1
+    stp x9,  x10, [sp, #256]
+
+    /* x0 = pointer to TrapFrame for Rust handler */
+    mov x0, sp
+.endm
+.macro RESTORE_CONTEXT_LOWER
+    /* Restore ELR_EL1 + SPSR_EL1 */
+    ldp x9,  x10, [sp, #256]
+    msr elr_el1, x9
+    msr spsr_el1, x10
+
+    /* Restore SP_EL0 (user stack for the target task) */
+    ldr x9, [sp, #248]
+    msr sp_el0, x9
+
+    /* Restore x0–x30 */
+    ldp x0,  x1,  [sp, #0]
+    ldp x2,  x3,  [sp, #16]
+    ldp x4,  x5,  [sp, #32]
+    ldp x6,  x7,  [sp, #48]
+    ldp x8,  x9,  [sp, #64]
+    ldp x10, x11, [sp, #80]
+    ldp x12, x13, [sp, #96]
+    ldp x14, x15, [sp, #112]
+    ldp x16, x17, [sp, #128]
+    ldp x18, x19, [sp, #144]
+    ldp x20, x21, [sp, #160]
+    ldp x22, x23, [sp, #176]
+    ldp x24, x25, [sp, #192]
+    ldp x26, x27, [sp, #208]
+    ldp x28, x29, [sp, #224]
+    ldr x30,      [sp, #240]
+
+    /* Deallocate TrapFrame — SP now at kernel stack top (of OLD task) */
+    add sp, sp, #288
+
+    /* Return from exception */
     eret
 .endm
 
@@ -175,10 +269,10 @@ _exc_sync_cur_spx:
     RESTORE_CONTEXT
 
 _exc_sync_lower64:
-    SAVE_CONTEXT
+    SAVE_CONTEXT_LOWER
     mov x1, #2          /* source = 2: lower EL, AArch64 */
     bl  exception_dispatch_sync
-    RESTORE_CONTEXT
+    RESTORE_CONTEXT_LOWER
 
 /* ═══════════════════════════════════════════════════════════════════
  * IRQ handlers — save context, call Rust, restore
@@ -195,9 +289,9 @@ _exc_irq_cur_spx:
     RESTORE_CONTEXT
 
 _exc_irq_lower64:
-    SAVE_CONTEXT
+    SAVE_CONTEXT_LOWER
     bl  exception_dispatch_irq
-    RESTORE_CONTEXT
+    RESTORE_CONTEXT_LOWER
 
 /* ═══════════════════════════════════════════════════════════════════
  * FIQ / SError stub — halt safely
@@ -276,11 +370,41 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
         2 => crate::ipc::sys_recv(frame, frame.x[6] as usize),
         // SYS_CALL = 3: send + receive (ep_id in x6)
         3 => crate::ipc::sys_call(frame, frame.x[6] as usize),
+        // SYS_WRITE = 4: write buffer to UART (x0=buf, x1=len)
+        4 => handle_sys_write(frame),
         _ => {
             uart_print("!!! unknown syscall #");
             uart_print_hex(syscall_nr);
             uart_print(" !!!\n");
         }
+    }
+}
+
+/// SYS_WRITE handler: write bytes to UART on behalf of EL0 task.
+/// x0 = pointer to buffer, x1 = length in bytes.
+/// Validates that the buffer pointer is in user-accessible memory.
+fn handle_sys_write(frame: &TrapFrame) {
+    let buf_ptr = frame.x[0] as usize;
+    let len = frame.x[1] as usize;
+
+    // Validate: max 256 bytes per write, non-zero length
+    if len == 0 || len > 256 {
+        return;
+    }
+
+    // Validate: buffer must be in the kernel image range (shared code/rodata)
+    // or in user stack range. For now, allow any address in the identity-mapped
+    // RAM region (0x4000_0000 – 0x4800_0000) since all tasks share address space.
+    let buf_end = buf_ptr.wrapping_add(len);
+    if buf_ptr < 0x4000_0000 || buf_end > 0x4800_0000 || buf_end < buf_ptr {
+        uart_print("!!! SYS_WRITE: bad pointer !!!\n");
+        return;
+    }
+
+    // Safe to read — copy bytes to UART
+    for i in 0..len {
+        let byte = unsafe { core::ptr::read_volatile((buf_ptr + i) as *const u8) };
+        crate::uart_write(byte);
     }
 }
 

@@ -107,6 +107,28 @@ pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
     reply0
 }
 
+/// SYS_WRITE (syscall #4): write string to UART via kernel.
+/// buf = pointer to string data, len = byte count.
+/// Used by EL0 tasks that cannot access UART directly.
+#[inline(always)]
+pub fn syscall_write(buf: *const u8, len: usize) {
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") buf as u64,
+            in("x1") len as u64,
+            in("x7") 4u64, // SYS_WRITE
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// Print a string from EL0 via SYS_WRITE syscall
+#[inline(always)]
+pub fn user_print(s: &str) {
+    syscall_write(s.as_ptr(), s.len());
+}
+
 // ─── Task entry points ─────────────────────────────────────────────
 
 /// Task A (client): send "PING" on EP 0, receive reply
@@ -114,7 +136,7 @@ pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
 pub extern "C" fn task_a_entry() -> ! {
     loop {
         // Send PING (msg[0] = 0x50494E47 = "PING" in ASCII hex)
-        uart_print("A:PING ");
+        user_print("A:PING ");
         syscall_call(0, 0x50494E47, 0, 0, 0);
     }
 }
@@ -125,7 +147,7 @@ pub extern "C" fn task_b_entry() -> ! {
     loop {
         // Receive message
         let _msg = syscall_recv(0);
-        uart_print("B:PONG ");
+        user_print("B:PONG ");
         // Reply by sending back on same endpoint
         syscall_send(0, 0x504F4E47, 0, 0, 0); // "PONG"
     }
@@ -166,11 +188,11 @@ pub extern "C" fn kernel_main() -> ! {
     // Start timer: 10ms periodic tick (IRQ still masked — won't fire yet)
     timer::init(10);
 
-    uart_print("[AegisOS] bootstrapping into task_a...\n");
+    uart_print("[AegisOS] bootstrapping into task_a (EL0)...\n");
 
     // Bootstrap: load task_a context and eret into it — never returns.
-    // The eret restores SPSR with IRQ unmasked (0x345), so interrupts
-    // become active exactly when task_a starts executing.
+    // The eret restores SPSR = 0x000 (EL0t), dropping to user mode.
+    // SAVE_CONTEXT_LOWER reloads SP to __stack_end on every exception entry.
     sched::bootstrap();
 }
 

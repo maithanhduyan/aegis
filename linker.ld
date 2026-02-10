@@ -41,13 +41,23 @@ SECTIONS
     }
     __page_tables_end = .;
 
-    /* === Task Stacks (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    /* === Kernel Stacks per task (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    /* Used as SP_EL1 when handling exceptions from EL0 tasks */
     . = ALIGN(4096);
     __task_stacks_start = .;
     .task_stacks (NOLOAD) : {
         . += 3 * 4096;
     }
     __task_stacks_end = .;
+
+    /* === User Stacks per task (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    /* Used as SP_EL0 when tasks run in user mode (EL0) */
+    . = ALIGN(4096);
+    __user_stacks_start = .;
+    .user_stacks (NOLOAD) : {
+        . += 3 * 4096;
+    }
+    __user_stacks_end = .;
 
     /* === Stack Guard Page (4KB invalid — catches stack overflow) === */
     . = ALIGN(4096);

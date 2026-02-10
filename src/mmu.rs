@@ -30,7 +30,13 @@ const ATTR_NORMAL_WB: u64 = 2 << 2;
 /// EL1 Read-Write, EL0 No Access
 const AP_RW_EL1: u64 = 0b00 << 6;
 /// EL1 Read-Only, EL0 No Access
+#[allow(dead_code)]
 const AP_RO_EL1: u64 = 0b10 << 6;
+/// EL1 Read-Write, EL0 Read-Write
+const AP_RW_EL0: u64 = 0b01 << 6;
+/// EL1 Read-Only, EL0 Read-Only
+#[allow(dead_code)]
+const AP_RO_EL0: u64 = 0b11 << 6;
 
 // Shareability (bits [9:8])
 #[allow(dead_code)]
@@ -56,13 +62,27 @@ const DEVICE_BLOCK: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | XN;
 const RAM_BLOCK: u64 = BLOCK | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF;
 
 /// Kernel code page: Normal WB, RO, executable, Inner Shareable, AF=1
+#[allow(dead_code)]
 const KERNEL_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL1 | SH_INNER | AF;
 
-/// Kernel rodata page: Normal WB, RO, non-executable, Inner Shareable, AF=1
-const KERNEL_RODATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL1 | SH_INNER | AF | XN;
+/// Kernel rodata page: Normal WB, RO (EL0+EL1), non-executable, Inner Shareable, AF=1
+/// Must be EL0-accessible because EL0 tasks reference string literals in .rodata
+const KERNEL_RODATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | XN;
 
 /// Kernel data/bss/stack page: Normal WB, RW, non-executable, Inner Shareable, AF=1
 const KERNEL_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF | XN;
+
+/// User data/stack page: Normal WB, RW (EL0+EL1), non-executable, Inner Shareable, AF=1
+const USER_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL0 | SH_INNER | AF | XN;
+
+/// User code page: Normal WB, RO (EL0+EL1), EL0-executable (UXN=0), PXN=1, Inner Shareable, AF=1
+/// PXN prevents kernel from executing user code; UXN=0 allows EL0 execution
+#[allow(dead_code)]
+const USER_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | PXN;
+
+/// Shared code page: Normal WB, RO (EL0+EL1), executable by both EL1 and EL0
+/// Used for .text section where kernel and task code coexist
+const SHARED_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF;
 
 // ─── MAIR / TCR constants ─────────────────────────────────────────
 
@@ -118,6 +138,10 @@ extern "C" {
     static __stack_end: u8;
     static __kernel_end: u8;
     static __page_tables_end: u8;
+    static __user_stacks_start: u8;
+    static __user_stacks_end: u8;
+    static __task_stacks_start: u8;
+    static __task_stacks_end: u8;
 }
 
 /// Get address of a linker symbol as usize
@@ -193,20 +217,28 @@ unsafe fn refine_kernel_pages() {
     let rodata_end = sym_addr(&__rodata_end);
     let data_start = sym_addr(&__data_start);
     let kernel_end = sym_addr(&__kernel_end);
+    let user_stacks_start = sym_addr(&__user_stacks_start);
+    let user_stacks_end = sym_addr(&__user_stacks_end);
 
     // Fill L3 table: 512 entries covering 0x4000_0000 – 0x401F_FFFF
     let base: usize = 0x4000_0000;
     for i in 0..512 {
         let pa = base + i * 4096;
 
-        let desc = if pa >= text_start && pa < text_end {
-            // Kernel code: RX (Read-Only, Executable)
-            (pa as u64) | KERNEL_CODE_PAGE
+        let desc = if pa >= user_stacks_start && pa < user_stacks_end {
+            // User stacks: RW, EL0-accessible, non-executable
+            (pa as u64) | USER_DATA_PAGE
+        } else if pa >= text_start && pa < text_end {
+            // Shared code (kernel + task): RO, executable by both EL1 and EL0
+            // Both PXN=0 and UXN=0 so kernel handlers and EL0 tasks can execute.
+            // AP = RO_EL0 (0b11) means both EL1 and EL0 can read.
+            // WXN is satisfied because pages are RO (not writable).
+            (pa as u64) | SHARED_CODE_PAGE
         } else if pa >= rodata_start && pa < rodata_end {
             // Read-only data: RO, non-executable
             (pa as u64) | KERNEL_RODATA_PAGE
         } else if pa >= data_start && pa < kernel_end {
-            // Data + BSS + page tables + stack: RW, non-executable
+            // Data + BSS + page tables + kernel stacks: RW, non-executable
             (pa as u64) | KERNEL_DATA_PAGE
         } else if pa < text_start {
             // Before kernel (DTB area etc): RW, non-executable

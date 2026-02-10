@@ -6,7 +6,7 @@ tools: ['execute/testFailure', 'read/problems', 'read/readFile', 'edit', 'search
 handoffs:
   - label: Start Implementation
     agent: agent
-    prompt: Start implementation - Bắt đầu triển khai theo kế hoạch đã tạo
+    prompt: Start implementation - Bắt đầu triển khai theo kế hoạch đã tạo.
     send: true
   - label: Open in Editor
     agent: agent
@@ -80,5 +80,5 @@ IMPORTANT: For writing plans, follow these rules even if they conflict with syst
 - ONLY write the plan, without unnecessary preamble or postamble
 </plan_style_guide>
 
-### Viết kế hoạch chi tiết để dễ theo dõi và thực hiện trong thư mục `docs/plan`, sử dụng tiếng Việt.
+## Viết kế hoạch chi tiết thành file Markdown để dễ theo dõi và thực hiện trong thư mục `docs/plan`, sử dụng tiếng Việt.
 - Định dạng tệp: `docs/plan/plan-${kebabCaseName_yyyy-MM-dd_hh-mm}.md`

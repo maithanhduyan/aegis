@@ -227,3 +227,5 @@ Thêm `.task_stacks` section (NOLOAD, 3 × 4096 = 12KB, aligned 4096) sau `.page
 4. **Re-arm timer trước EOI**: nếu EOI trước re-arm, có khoảng trống timer không đếm → jitter. Re-arm trước, EOI sau.
 5. **`eret` là atomic**: restore `ELR_EL1` + `SPSR_EL1` **trước** `eret`, không có instruction nào chen giữa ghi SPSR và eret.
 6. **FP/SIMD disabled**: set `CPACR_EL1.FPEN = 0b00` trong boot.s — bất kỳ FP instruction nào sẽ trap, bắt lỗi compiler tự sinh FP code.
+
+Phase D sẽ thêm per-task page table + EL0 isolation, dựa trên nền tảng Phase C này.
