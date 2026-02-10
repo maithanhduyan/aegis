@@ -82,3 +82,5 @@ IMPORTANT: For writing plans, follow these rules even if they conflict with syst
 
 ## Viết kế hoạch chi tiết thành file Markdown để dễ theo dõi và thực hiện trong thư mục `docs/plan`, sử dụng tiếng Việt.
 - Định dạng tệp: `docs/plan/plan-${kebabCaseName_yyyy-MM-dd_hh-mm}.md`
+
+## Cuối file đề xuất các bước tiếp theo/hành động dựa trên kế hoạch đã viết.

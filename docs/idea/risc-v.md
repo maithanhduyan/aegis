@@ -485,3 +485,54 @@ Câu hỏi cần trả lời để chọn đúng phần cứng:
 * muốn đi ARM lâu dài hay sau này sang RISC-V?
 * làm một mình hay có team?
 * mục tiêu 1 năm tới là gì: research hay production-grade?
+
+
+---
+## Review
+
+Cả hai ý tưởng trong file đều **khả thi và đúng hướng**. Nhưng cần phân biệt rõ **thời điểm**:
+
+---
+
+### 1. Port sang RISC-V — ✅ Khả thi, nhưng **chưa phải lúc**
+
+Phân tích trong file **chính xác về mặt kỹ thuật**:
+- ~30–40% kernel phải viết lại (boot, MMU, context switch, timer, interrupt)
+- Scheduler, IPC, fault isolation — giữ nguyên 100%
+- Cần tách `arch/` để portable
+
+**Tuy nhiên**, AegisOS hiện tại **chưa nên port**:
+- Kernel mới 5 phase (A→E), ~1000 dòng Rust + asm
+- Chưa đủ trưởng thành để biết đâu là ranh giới `arch/` vs `core/` thật sự
+- Tách sớm quá → over-engineering, chậm tiến độ
+- RISC-V QEMU virt machine có toolchain tốt, nhưng **ecosystem debug kém hơn** ARM hiện tại
+
+**Chiến lược đúng:** Tiếp tục ARM, nhưng **ý thức** không hardcode — khi kernel đạt ~Phase H–I (có capability, có driver model), lúc đó refactor tách `arch/` sẽ tự nhiên và chính xác hơn.
+
+---
+
+### 2. Hardware thật — ✅ Khả thi, nhưng **ưu tiên sau**
+
+Phân tích thiết bị trong file rất thực tế. Nhưng hiện tại:
+
+| Giai đoạn | Nên dùng | Lý do |
+|---|---|---|
+| **Bây giờ** (Phase E xong) | QEMU | Miễn phí, debug nhanh, deterministic, đủ cho kernel research |
+| **Khi có SMP + driver** (~Phase G–H) | Raspberry Pi 4 + USB-UART + J-Link | Bring-up rẻ, tài liệu nhiều |
+| **Khi hướng certification** | i.MX8 / Zynq + lab setup | Board công nghiệp, JTAG, test automation |
+
+**QEMU vẫn là lựa chọn đúng** cho giai đoạn hiện tại. Chuyển sang hardware quá sớm sẽ tốn thời gian vào vấn đề bootloader/firmware thay vì phát triển kernel.
+
+---
+
+### Tóm lại
+
+| Ý tưởng | Khả thi? | Nên làm khi nào? |
+|---|---|---|
+| Thiết kế portable (ý thức không hardcode ARM) | ✅ Làm ngay | Mỗi phase đều giữ logic tách khỏi register |
+| Tách `arch/aarch64/` + `core/` thật sự | ✅ Nhưng chờ | Khi kernel đủ lớn (~Phase H) |
+| Port RISC-V | ✅ Nhưng chờ | Khi ARM port đã ổn định |
+| Raspberry Pi bring-up | ✅ Nhưng chờ | Khi có SMP + basic driver |
+| Lab safety-critical | ✅ Dài hạn | Khi hướng certification thật |
+
+File risc-v.md nên giữ lại làm **tài liệu tầm nhìn dài hạn** — phân tích kỹ thuật trong đó đúng và sẽ hữu ích khi đến thời điểm thực hiện.

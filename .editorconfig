@@ -1,4 +1,4 @@
-# EditorConfig — Enforce encoding/formatting across ALL editors
+# EditorConfig — AegisOS (bare-metal AArch64 Rust microkernel)
 # https://editorconfig.org
 root = true
 
@@ -10,24 +10,8 @@ indent_size = 4
 insert_final_newline = true
 trim_trailing_whitespace = true
 
-[*.py]
-charset = utf-8
-indent_size = 4
-
-[*.{js,css,html}]
-charset = utf-8
-indent_size = 4
-
 [*.{json,yml,yaml}]
-charset = utf-8
 indent_size = 2
-
-[*.csv]
-charset = utf-8
-trim_trailing_whitespace = false
 
 [*.md]
 trim_trailing_whitespace = false
-
-[Makefile]
-indent_style = tab
