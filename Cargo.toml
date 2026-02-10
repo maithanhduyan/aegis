@@ -1,0 +1,11 @@
+[package]
+name = "aegis_os"
+version = "0.1.0"
+edition = "2021"
+authors = ["AegisOS Team"]
+description = "Safety-critical AArch64 microkernel"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true

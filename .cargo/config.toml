@@ -1,0 +1,11 @@
+[build]
+target = "aarch64-aegis.json"
+
+[target.aarch64-aegis]
+rustflags = [
+  "-C", "link-arg=-Tlinker.ld",
+]
+
+[unstable]
+build-std = ["core"]
+build-std-features = ["compiler-builtins-mem"]
