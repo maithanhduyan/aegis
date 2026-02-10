@@ -1,3 +1,11 @@
+---
+lang: vi
+title: "🚀 Tại Sao Chúng Ta Cần Một Hệ Điều Hành"
+tags: ["hệ điều hành", "an toàn", "kỹ thuật phần mềm", "aegisos", "lập trình hệ thống"]
+description: "Viết cho những bạn nhỏ lớp 5 có ước mơ lớn — những người sẽ thay đổi thế giới."
+date: 2026-02-10
+---
+
 # 🚀 Tại Sao Chúng Ta Cần Một Hệ Điều Hành — Và Tại Sao Em Có Thể Tự Tạo Một Cái?
 
 > *Viết cho những bạn nhỏ lớp 5 có ước mơ lớn — những người sẽ thay đổi thế giới.*

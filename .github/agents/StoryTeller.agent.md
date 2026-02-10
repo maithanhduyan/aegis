@@ -4,8 +4,8 @@ description: Viết blog khoa học máy tính dễ hiểu, truyền cảm hứn
 argument-hint: Chủ đề kỹ thuật cần giải thích (vd. "MMU là gì", "tại sao cần encryption")
 tools: ['read/readFile', 'edit', 'search', 'web', 'agent']
 handoffs:
-  - label: Start Writing
-    agent: agent
+  - label: Bắt đầu viết bài blog
+    agent: StoryTeller
     prompt: Bắt đầu viết bài blog dựa trên nghiên cứu đã thu thập
     send: true
 ---

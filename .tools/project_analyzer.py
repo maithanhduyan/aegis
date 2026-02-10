@@ -182,8 +182,9 @@ if __name__ == "__main__":
         "CHANGELOG.md",
         ".vscodeignore",
         "package-lock.json",
-        "*.vsix"
-
+        "*.vsix",
+        ".editorconfig",
+        ".gitattributes",
     ]  # Tệp cần bỏ qua
 
     files = collect_files(root_dir, extensions, filenames, exclude_dirs, exclude_files)
