@@ -396,6 +396,10 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
         3 => crate::ipc::sys_call(frame, frame.x[6] as usize),
         // SYS_WRITE = 4: write buffer to UART (x0=buf, x1=len)
         4 => handle_sys_write(frame),
+        // SYS_NOTIFY = 5: send notification to target (x6=target_id, x0=bitmask)
+        5 => handle_notify(frame),
+        // SYS_WAIT_NOTIFY = 6: wait for notification (returns pending bits in x0)
+        6 => handle_wait_notify(frame),
         _ => {
             uart_print("!!! unknown syscall #");
             uart_print_hex(syscall_nr);
@@ -425,6 +429,66 @@ fn handle_sys_write(frame: &TrapFrame) {
     for i in 0..checked_len {
         let byte = unsafe { core::ptr::read_volatile((buf_ptr + i) as *const u8) };
         crate::uart_write(byte);
+    }
+}
+
+/// SYS_NOTIFY handler: send async notification bits to a target task.
+/// x6 = target task ID, x0 = notification bitmask.
+/// OR-merges bits into target's notify_pending. If target is blocked
+/// in wait_notify, unblock it immediately.
+#[cfg(target_arch = "aarch64")]
+fn handle_notify(frame: &mut TrapFrame) {
+    let target_id = frame.x[6] as usize;
+    let bits = frame.x[0];
+
+    if target_id >= crate::sched::NUM_TASKS {
+        uart_print("!!! SYS_NOTIFY: invalid target\n");
+        frame.x[0] = 0xFFFF_DEAD;
+        return;
+    }
+
+    if bits == 0 {
+        return; // no-op
+    }
+
+    unsafe {
+        // OR-merge notification bits into target's pending mask
+        crate::sched::TCBS[target_id].notify_pending |= bits;
+
+        // If the target is blocked waiting for notifications, unblock it
+        if crate::sched::TCBS[target_id].notify_waiting {
+            crate::sched::TCBS[target_id].notify_waiting = false;
+
+            // Deliver pending bits into the target's x0 and clear
+            let pending = crate::sched::TCBS[target_id].notify_pending;
+            crate::sched::TCBS[target_id].notify_pending = 0;
+            crate::sched::set_task_reg(target_id, 0, pending);
+
+            crate::sched::set_task_state(target_id, crate::sched::TaskState::Ready);
+        }
+    }
+}
+
+/// SYS_WAIT_NOTIFY handler: wait for notification bits.
+/// If caller has pending bits: return immediately in x0 and clear.
+/// Otherwise: block caller, set notify_waiting=true, schedule away.
+#[cfg(target_arch = "aarch64")]
+fn handle_wait_notify(frame: &mut TrapFrame) {
+    unsafe {
+        let current = crate::sched::CURRENT;
+
+        let pending = crate::sched::TCBS[current].notify_pending;
+        if pending != 0 {
+            // Notifications already pending — deliver immediately
+            frame.x[0] = pending;
+            crate::sched::TCBS[current].notify_pending = 0;
+        } else {
+            // No pending notifications — block and wait
+            crate::sched::save_frame(current, frame);
+            crate::sched::TCBS[current].notify_waiting = true;
+            crate::sched::set_task_state(current, crate::sched::TaskState::Blocked);
+            crate::sched::schedule(frame);
+        }
     }
 }
 

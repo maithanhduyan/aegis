@@ -121,6 +121,38 @@ pub fn user_print(s: &str) {
     syscall_write(s.as_ptr(), s.len());
 }
 
+/// SYS_NOTIFY (syscall #5): send notification bitmask to target task.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_notify(target_id: u64, bits: u64) {
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") bits,
+            in("x6") target_id,
+            in("x7") 5u64, // SYS_NOTIFY
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// SYS_WAIT_NOTIFY (syscall #6): block until notification arrives.
+/// Returns the pending bitmask in x0.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_wait_notify() -> u64 {
+    let bits: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x7") 6u64, // SYS_WAIT_NOTIFY
+            lateout("x0") bits,
+            options(nomem, nostack)
+        );
+    }
+    bits
+}
+
 // ─── Task entry points ─────────────────────────────────────────────
 
 /// Task A (client): send "PING" on EP 0, receive reply
@@ -178,14 +210,17 @@ pub extern "C" fn kernel_main() -> ! {
     // ─── Phase G: Assign capabilities ──────────────────────────────
     unsafe {
         use aegis_os::cap::*;
-        // Task 0 (task_a): PING client — needs CALL on EP0 + WRITE + YIELD
-        sched::TCBS[0].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD;
-        // Task 1 (task_b): PONG server — needs RECV/SEND on EP0 + WRITE + YIELD
-        sched::TCBS[1].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD;
+        // Task 0 (task_a): PING client — needs CALL on EP0 + WRITE + YIELD + notifications
+        sched::TCBS[0].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
+            | CAP_NOTIFY | CAP_WAIT_NOTIFY;
+        // Task 1 (task_b): PONG server — needs RECV/SEND on EP0 + WRITE + YIELD + notifications
+        sched::TCBS[1].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
+            | CAP_NOTIFY | CAP_WAIT_NOTIFY;
         // Task 2 (idle): only needs YIELD (WFI loop)
         sched::TCBS[2].caps = CAP_YIELD;
     }
     uart_print("[AegisOS] capabilities assigned\n");
+    uart_print("[AegisOS] notification system ready\n");
 
     // ─── Phase H: Assign per-task address spaces ───────────────────
     unsafe {

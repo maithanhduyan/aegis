@@ -39,6 +39,8 @@ pub struct Tcb {
     pub fault_tick: u64,      // tick when task was marked Faulted
     pub caps: CapBits,        // capability bitmask (survives restart)
     pub ttbr0: u64,           // TTBR0_EL1 value (ASID << 48 | L1 base)
+    pub notify_pending: u64,  // bitmask of pending notification bits
+    pub notify_waiting: bool, // true if task is blocked in wait_notify
 }
 
 // ─── Static task table ─────────────────────────────────────────────
@@ -68,6 +70,8 @@ pub const EMPTY_TCB: Tcb = Tcb {
     fault_tick: 0,
     caps: 0,
     ttbr0: 0,
+    notify_pending: 0,
+    notify_waiting: false,
 };
 
 // ─── Public API ────────────────────────────────────────────────────
@@ -305,6 +309,8 @@ pub fn restart_task(task_idx: usize) {
         TCBS[task_idx].context.sp_el0 = TCBS[task_idx].user_stack_top;
 
         TCBS[task_idx].state = TaskState::Ready;
+        TCBS[task_idx].notify_pending = 0;
+        TCBS[task_idx].notify_waiting = false;
 
         uart_print("[AegisOS] TASK ");
         crate::uart_print_hex(id as u64);

@@ -27,6 +27,18 @@ pub const CAP_IPC_RECV_EP1: CapBits = 1 << 3;
 pub const CAP_WRITE: CapBits        = 1 << 4;
 /// Permission to yield CPU (SYS_YIELD)
 pub const CAP_YIELD: CapBits        = 1 << 5;
+/// Permission to send notifications (SYS_NOTIFY)
+pub const CAP_NOTIFY: CapBits       = 1 << 6;
+/// Permission to wait for notifications (SYS_WAIT_NOTIFY)
+pub const CAP_WAIT_NOTIFY: CapBits  = 1 << 7;
+/// Permission to send IPC on endpoint 2
+pub const CAP_IPC_SEND_EP2: CapBits = 1 << 8;
+/// Permission to receive IPC on endpoint 2
+pub const CAP_IPC_RECV_EP2: CapBits = 1 << 9;
+/// Permission to send IPC on endpoint 3
+pub const CAP_IPC_SEND_EP3: CapBits = 1 << 10;
+/// Permission to receive IPC on endpoint 3
+pub const CAP_IPC_RECV_EP3: CapBits = 1 << 11;
 
 // ─── Convenience combos ────────────────────────────────────────────
 
@@ -36,7 +48,13 @@ pub const CAP_ALL: CapBits = CAP_IPC_SEND_EP0
     | CAP_IPC_SEND_EP1
     | CAP_IPC_RECV_EP1
     | CAP_WRITE
-    | CAP_YIELD;
+    | CAP_YIELD
+    | CAP_NOTIFY
+    | CAP_WAIT_NOTIFY
+    | CAP_IPC_SEND_EP2
+    | CAP_IPC_RECV_EP2
+    | CAP_IPC_SEND_EP3
+    | CAP_IPC_RECV_EP3;
 
 /// No capabilities
 pub const CAP_NONE: CapBits = 0;
@@ -65,22 +83,32 @@ pub fn cap_for_syscall(syscall_nr: u64, ep_id: u64) -> CapBits {
         1 => match ep_id {
             0 => CAP_IPC_SEND_EP0,
             1 => CAP_IPC_SEND_EP1,
+            2 => CAP_IPC_SEND_EP2,
+            3 => CAP_IPC_SEND_EP3,
             _ => 0, // invalid endpoint
         },
         // SYS_RECV = 2
         2 => match ep_id {
             0 => CAP_IPC_RECV_EP0,
             1 => CAP_IPC_RECV_EP1,
+            2 => CAP_IPC_RECV_EP2,
+            3 => CAP_IPC_RECV_EP3,
             _ => 0,
         },
         // SYS_CALL = 3: needs both send and recv on the endpoint
         3 => match ep_id {
             0 => CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0,
             1 => CAP_IPC_SEND_EP1 | CAP_IPC_RECV_EP1,
+            2 => CAP_IPC_SEND_EP2 | CAP_IPC_RECV_EP2,
+            3 => CAP_IPC_SEND_EP3 | CAP_IPC_RECV_EP3,
             _ => 0,
         },
         // SYS_WRITE = 4
         4 => CAP_WRITE,
+        // SYS_NOTIFY = 5
+        5 => CAP_NOTIFY,
+        // SYS_WAIT_NOTIFY = 6
+        6 => CAP_WAIT_NOTIFY,
         // Unknown syscall — no valid cap
         _ => 0,
     }
@@ -96,6 +124,12 @@ pub fn cap_name(cap: CapBits) -> &'static str {
         CAP_IPC_RECV_EP1 => "IPC_RECV_EP1",
         CAP_WRITE         => "WRITE",
         CAP_YIELD         => "YIELD",
+        CAP_NOTIFY        => "NOTIFY",
+        CAP_WAIT_NOTIFY   => "WAIT_NOTIFY",
+        CAP_IPC_SEND_EP2  => "IPC_SEND_EP2",
+        CAP_IPC_RECV_EP2  => "IPC_RECV_EP2",
+        CAP_IPC_SEND_EP3  => "IPC_SEND_EP3",
+        CAP_IPC_RECV_EP3  => "IPC_RECV_EP3",
         CAP_ALL           => "ALL",
         CAP_NONE          => "NONE",
         _                 => "UNKNOWN",

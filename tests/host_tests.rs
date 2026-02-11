@@ -24,6 +24,9 @@ use aegis_os::ipc::{self, EMPTY_EP, MAX_ENDPOINTS, MSG_REGS};
 use aegis_os::cap::{
     self, CAP_IPC_SEND_EP0, CAP_IPC_RECV_EP0,
     CAP_IPC_SEND_EP1, CAP_IPC_RECV_EP1, CAP_WRITE, CAP_YIELD,
+    CAP_NOTIFY, CAP_WAIT_NOTIFY,
+    CAP_IPC_SEND_EP2, CAP_IPC_RECV_EP2,
+    CAP_IPC_SEND_EP3, CAP_IPC_RECV_EP3,
     CAP_ALL, CAP_NONE,
 };
 
@@ -47,6 +50,8 @@ unsafe fn reset_test_state() {
         sched::TCBS[i].user_stack_top = 0x5000_0000 + ((i as u64 + 1) * 4096);
         sched::TCBS[i].entry_point = 0x4008_0000 + (i as u64 * 0x100);
         sched::TCBS[i].ttbr0 = 0;
+        sched::TCBS[i].notify_pending = 0;
+        sched::TCBS[i].notify_waiting = false;
     }
     sched::CURRENT = 0;
     sched::TCBS[0].state = TaskState::Running;
@@ -616,9 +621,9 @@ fn ipc_cleanup_clears_sender_slot() {
     unsafe {
         reset_test_state();
 
-        ipc::ENDPOINTS[0].sender = Some(1);
+        ipc::ENDPOINTS[0].sender_queue.push(1);
         ipc::cleanup_task(1);
-        assert_eq!(ipc::ENDPOINTS[0].sender, None);
+        assert!(!ipc::ENDPOINTS[0].sender_queue.contains(1));
     }
 }
 
@@ -638,10 +643,10 @@ fn ipc_cleanup_clears_both_endpoints() {
     unsafe {
         reset_test_state();
 
-        ipc::ENDPOINTS[0].sender = Some(1);
+        ipc::ENDPOINTS[0].sender_queue.push(1);
         ipc::ENDPOINTS[1].receiver = Some(1);
         ipc::cleanup_task(1);
-        assert_eq!(ipc::ENDPOINTS[0].sender, None);
+        assert!(!ipc::ENDPOINTS[0].sender_queue.contains(1));
         assert_eq!(ipc::ENDPOINTS[1].receiver, None);
     }
 }
@@ -651,17 +656,17 @@ fn ipc_cleanup_doesnt_affect_other_tasks() {
     unsafe {
         reset_test_state();
 
-        ipc::ENDPOINTS[0].sender = Some(0);
+        ipc::ENDPOINTS[0].sender_queue.push(0);
         ipc::ENDPOINTS[0].receiver = Some(2);
-        ipc::ENDPOINTS[1].sender = Some(1);
+        ipc::ENDPOINTS[1].sender_queue.push(1);
 
         ipc::cleanup_task(1);
 
         // Task 0 and 2 slots should be untouched
-        assert_eq!(ipc::ENDPOINTS[0].sender, Some(0));
+        assert!(ipc::ENDPOINTS[0].sender_queue.contains(0));
         assert_eq!(ipc::ENDPOINTS[0].receiver, Some(2));
         // Task 1 slot should be cleared
-        assert_eq!(ipc::ENDPOINTS[1].sender, None);
+        assert!(!ipc::ENDPOINTS[1].sender_queue.contains(1));
     }
 }
 
@@ -694,12 +699,12 @@ fn ipc_msg_regs_count() {
 
 #[test]
 fn ipc_max_endpoints() {
-    assert_eq!(MAX_ENDPOINTS, 2);
+    assert_eq!(MAX_ENDPOINTS, 4);
 }
 
 #[test]
 fn ipc_endpoint_initial_state() {
-    assert_eq!(EMPTY_EP.sender, None);
+    assert_eq!(EMPTY_EP.sender_queue.count, 0);
     assert_eq!(EMPTY_EP.receiver, None);
 }
 
@@ -715,6 +720,9 @@ fn cap_bits_are_distinct_powers_of_two() {
         CAP_IPC_SEND_EP0, CAP_IPC_RECV_EP0,
         CAP_IPC_SEND_EP1, CAP_IPC_RECV_EP1,
         CAP_WRITE, CAP_YIELD,
+        CAP_NOTIFY, CAP_WAIT_NOTIFY,
+        CAP_IPC_SEND_EP2, CAP_IPC_RECV_EP2,
+        CAP_IPC_SEND_EP3, CAP_IPC_RECV_EP3,
     ];
     // Each must be a single bit (power of 2)
     for &c in &all {
@@ -737,6 +745,12 @@ fn cap_all_includes_every_bit() {
     assert!(cap::cap_check(CAP_ALL, CAP_IPC_RECV_EP1));
     assert!(cap::cap_check(CAP_ALL, CAP_WRITE));
     assert!(cap::cap_check(CAP_ALL, CAP_YIELD));
+    assert!(cap::cap_check(CAP_ALL, CAP_NOTIFY));
+    assert!(cap::cap_check(CAP_ALL, CAP_WAIT_NOTIFY));
+    assert!(cap::cap_check(CAP_ALL, CAP_IPC_SEND_EP2));
+    assert!(cap::cap_check(CAP_ALL, CAP_IPC_RECV_EP2));
+    assert!(cap::cap_check(CAP_ALL, CAP_IPC_SEND_EP3));
+    assert!(cap::cap_check(CAP_ALL, CAP_IPC_RECV_EP3));
 }
 
 #[test]
@@ -785,8 +799,12 @@ fn cap_for_syscall_yield() {
 fn cap_for_syscall_send_recv() {
     assert_eq!(cap::cap_for_syscall(1, 0), CAP_IPC_SEND_EP0);
     assert_eq!(cap::cap_for_syscall(1, 1), CAP_IPC_SEND_EP1);
+    assert_eq!(cap::cap_for_syscall(1, 2), CAP_IPC_SEND_EP2);
+    assert_eq!(cap::cap_for_syscall(1, 3), CAP_IPC_SEND_EP3);
     assert_eq!(cap::cap_for_syscall(2, 0), CAP_IPC_RECV_EP0);
     assert_eq!(cap::cap_for_syscall(2, 1), CAP_IPC_RECV_EP1);
+    assert_eq!(cap::cap_for_syscall(2, 2), CAP_IPC_RECV_EP2);
+    assert_eq!(cap::cap_for_syscall(2, 3), CAP_IPC_RECV_EP3);
 }
 
 #[test]
@@ -797,6 +815,12 @@ fn cap_for_syscall_call_needs_both() {
     // SYS_CALL on EP1
     let required1 = cap::cap_for_syscall(3, 1);
     assert_eq!(required1, CAP_IPC_SEND_EP1 | CAP_IPC_RECV_EP1);
+    // SYS_CALL on EP2
+    let required2 = cap::cap_for_syscall(3, 2);
+    assert_eq!(required2, CAP_IPC_SEND_EP2 | CAP_IPC_RECV_EP2);
+    // SYS_CALL on EP3
+    let required3 = cap::cap_for_syscall(3, 3);
+    assert_eq!(required3, CAP_IPC_SEND_EP3 | CAP_IPC_RECV_EP3);
 }
 
 #[test]
@@ -822,9 +846,15 @@ fn cap_name_returns_expected_strings() {
     assert_eq!(cap::cap_name(CAP_IPC_RECV_EP0), "IPC_RECV_EP0");
     assert_eq!(cap::cap_name(CAP_WRITE), "WRITE");
     assert_eq!(cap::cap_name(CAP_YIELD), "YIELD");
+    assert_eq!(cap::cap_name(CAP_NOTIFY), "NOTIFY");
+    assert_eq!(cap::cap_name(CAP_WAIT_NOTIFY), "WAIT_NOTIFY");
+    assert_eq!(cap::cap_name(CAP_IPC_SEND_EP2), "IPC_SEND_EP2");
+    assert_eq!(cap::cap_name(CAP_IPC_RECV_EP2), "IPC_RECV_EP2");
+    assert_eq!(cap::cap_name(CAP_IPC_SEND_EP3), "IPC_SEND_EP3");
+    assert_eq!(cap::cap_name(CAP_IPC_RECV_EP3), "IPC_RECV_EP3");
     assert_eq!(cap::cap_name(CAP_ALL), "ALL");
     assert_eq!(cap::cap_name(CAP_NONE), "NONE");
-    assert_eq!(cap::cap_name(0xFF), "UNKNOWN");
+    assert_eq!(cap::cap_name(0xFFFF), "UNKNOWN");
 }
 
 // ─── G3: Caps survive in EMPTY_TCB / TCB ──────────────────────────
@@ -1003,5 +1033,205 @@ fn addr_max_asid_fits_in_8_bits() {
     for t in 0..3_u16 {
         let asid = t + 1;
         assert!(asid <= 255, "task ASID must fit in 8 bits");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 8. Notification System Tests (Phase I)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn notify_empty_tcb_has_no_pending() {
+    assert_eq!(EMPTY_TCB.notify_pending, 0);
+    assert_eq!(EMPTY_TCB.notify_waiting, false);
+}
+
+#[test]
+fn notify_pending_or_merge() {
+    unsafe {
+        reset_test_state();
+        // Simulate two notifications merging via OR
+        sched::TCBS[1].notify_pending |= 0x01;
+        sched::TCBS[1].notify_pending |= 0x04;
+        assert_eq!(sched::TCBS[1].notify_pending, 0x05);
+    }
+}
+
+#[test]
+fn notify_pending_cleared_on_read() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].notify_pending = 0xFF;
+        // Simulate wait_notify: read and clear
+        let pending = sched::TCBS[0].notify_pending;
+        sched::TCBS[0].notify_pending = 0;
+        assert_eq!(pending, 0xFF);
+        assert_eq!(sched::TCBS[0].notify_pending, 0);
+    }
+}
+
+#[test]
+fn notify_waiting_flag() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[1].notify_waiting = true;
+        assert!(sched::TCBS[1].notify_waiting);
+        // Simulate notify delivery: clear waiting flag
+        sched::TCBS[1].notify_waiting = false;
+        assert!(!sched::TCBS[1].notify_waiting);
+    }
+}
+
+#[test]
+fn notify_cleared_on_restart() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[1].notify_pending = 0xABCD;
+        sched::TCBS[1].notify_waiting = true;
+        sched::TCBS[1].state = TaskState::Faulted;
+        sched::TCBS[1].fault_tick = 0;
+
+        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS;
+        let mut frame = TrapFrame {
+            x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
+        };
+        sched::schedule(&mut frame);
+
+        // After restart, notify state should be cleared
+        assert_eq!(sched::TCBS[1].notify_pending, 0,
+            "notify_pending must be cleared on restart");
+        assert_eq!(sched::TCBS[1].notify_waiting, false,
+            "notify_waiting must be cleared on restart");
+    }
+}
+
+#[test]
+fn notify_cap_for_syscall_notify() {
+    assert_eq!(cap::cap_for_syscall(5, 0), CAP_NOTIFY);
+    assert_eq!(cap::cap_for_syscall(5, 99), CAP_NOTIFY); // ep_id ignored
+}
+
+#[test]
+fn notify_cap_for_syscall_wait_notify() {
+    assert_eq!(cap::cap_for_syscall(6, 0), CAP_WAIT_NOTIFY);
+    assert_eq!(cap::cap_for_syscall(6, 99), CAP_WAIT_NOTIFY);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 9. Multi-Sender Queue Tests (Phase I)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn sender_queue_push_pop_fifo() {
+    let mut q = ipc::SenderQueue::new();
+    assert!(q.push(0));
+    assert!(q.push(1));
+    assert!(q.push(2));
+    assert_eq!(q.pop(), Some(0));
+    assert_eq!(q.pop(), Some(1));
+    assert_eq!(q.pop(), Some(2));
+    assert_eq!(q.pop(), None);
+}
+
+#[test]
+fn sender_queue_full_rejects() {
+    let mut q = ipc::SenderQueue::new();
+    for i in 0..ipc::MAX_WAITERS {
+        assert!(q.push(i), "push {} should succeed", i);
+    }
+    // Queue is full — push should fail
+    assert!(!q.push(99), "push should fail when queue is full");
+}
+
+#[test]
+fn sender_queue_remove_middle() {
+    let mut q = ipc::SenderQueue::new();
+    q.push(0);
+    q.push(1);
+    q.push(2);
+    q.remove(1);
+    assert_eq!(q.count, 2);
+    assert_eq!(q.pop(), Some(0));
+    assert_eq!(q.pop(), Some(2));
+    assert_eq!(q.pop(), None);
+}
+
+#[test]
+fn sender_queue_contains() {
+    let mut q = ipc::SenderQueue::new();
+    q.push(5);
+    q.push(7);
+    assert!(q.contains(5));
+    assert!(q.contains(7));
+    assert!(!q.contains(3));
+}
+
+#[test]
+fn sender_queue_wrap_around() {
+    let mut q = ipc::SenderQueue::new();
+    // Fill and drain to advance head
+    q.push(10);
+    q.push(11);
+    q.pop(); // head moves to 1
+    q.pop(); // head moves to 2
+
+    // Now push to wrap around
+    q.push(20);
+    q.push(21);
+    q.push(22);
+    q.push(23);
+    assert_eq!(q.count, 4);
+    assert_eq!(q.pop(), Some(20));
+    assert_eq!(q.pop(), Some(21));
+    assert_eq!(q.pop(), Some(22));
+    assert_eq!(q.pop(), Some(23));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 10. Expanded Endpoints Tests (Phase I)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn ipc_four_endpoints_exist() {
+    unsafe {
+        reset_test_state();
+        // All 4 endpoints should be accessible and initially empty
+        for i in 0..4 {
+            assert_eq!(ipc::ENDPOINTS[i].sender_queue.count, 0,
+                "EP{} sender_queue should be empty", i);
+            assert_eq!(ipc::ENDPOINTS[i].receiver, None,
+                "EP{} receiver should be None", i);
+        }
+    }
+}
+
+#[test]
+fn cap_for_syscall_ep2_ep3() {
+    assert_eq!(cap::cap_for_syscall(1, 2), CAP_IPC_SEND_EP2);
+    assert_eq!(cap::cap_for_syscall(2, 2), CAP_IPC_RECV_EP2);
+    assert_eq!(cap::cap_for_syscall(3, 2), CAP_IPC_SEND_EP2 | CAP_IPC_RECV_EP2);
+    assert_eq!(cap::cap_for_syscall(1, 3), CAP_IPC_SEND_EP3);
+    assert_eq!(cap::cap_for_syscall(2, 3), CAP_IPC_RECV_EP3);
+    assert_eq!(cap::cap_for_syscall(3, 3), CAP_IPC_SEND_EP3 | CAP_IPC_RECV_EP3);
+}
+
+#[test]
+fn ipc_cleanup_all_four_endpoints() {
+    unsafe {
+        reset_test_state();
+        // Put task 1 in all 4 endpoints
+        ipc::ENDPOINTS[0].sender_queue.push(1);
+        ipc::ENDPOINTS[1].receiver = Some(1);
+        ipc::ENDPOINTS[2].sender_queue.push(1);
+        ipc::ENDPOINTS[3].receiver = Some(1);
+
+        ipc::cleanup_task(1);
+
+        for i in 0..4 {
+            assert!(!ipc::ENDPOINTS[i].sender_queue.contains(1),
+                "EP{} should not contain task 1 after cleanup", i);
+            assert_ne!(ipc::ENDPOINTS[i].receiver, Some(1),
+                "EP{} receiver should not be task 1 after cleanup", i);
+        }
     }
 }

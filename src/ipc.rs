@@ -21,22 +21,81 @@ pub const SYS_RECV: u64 = 2;
 #[allow(dead_code)]
 pub const SYS_CALL: u64 = 3;
 
-pub const MAX_ENDPOINTS: usize = 2;
+pub const MAX_ENDPOINTS: usize = 4;
 pub const MSG_REGS: usize = 4; // x[0]..x[3]
+pub const MAX_WAITERS: usize = 4; // max senders queued per endpoint
 
 // ─── Endpoint ──────────────────────────────────────────────────────
 
-/// An IPC endpoint. One task can be waiting to send, one to receive.
-/// For simplicity: single-slot (one waiter per direction).
+/// Circular queue for sender waiters on an endpoint.
+pub struct SenderQueue {
+    pub tasks: [usize; MAX_WAITERS],
+    pub head: usize, // index of next task to dequeue
+    pub count: usize, // number of tasks in queue
+}
+
+impl SenderQueue {
+    pub const fn new() -> Self {
+        SenderQueue { tasks: [0; MAX_WAITERS], head: 0, count: 0 }
+    }
+
+    /// Push a task index. Returns false if queue is full.
+    pub fn push(&mut self, task: usize) -> bool {
+        if self.count >= MAX_WAITERS { return false; }
+        let tail = (self.head + self.count) % MAX_WAITERS;
+        self.tasks[tail] = task;
+        self.count += 1;
+        true
+    }
+
+    /// Pop the next sender. Returns None if empty.
+    pub fn pop(&mut self) -> Option<usize> {
+        if self.count == 0 { return None; }
+        let task = self.tasks[self.head];
+        self.head = (self.head + 1) % MAX_WAITERS;
+        self.count -= 1;
+        Some(task)
+    }
+
+    /// Remove a specific task from the queue (for cleanup).
+    pub fn remove(&mut self, task: usize) {
+        // Rebuild queue without the target task
+        let old_count = self.count;
+        let old_head = self.head;
+        let mut new_tasks = [0usize; MAX_WAITERS];
+        let mut new_count = 0usize;
+        for i in 0..old_count {
+            let idx = (old_head + i) % MAX_WAITERS;
+            if self.tasks[idx] != task {
+                new_tasks[new_count] = self.tasks[idx];
+                new_count += 1;
+            }
+        }
+        self.tasks = new_tasks;
+        self.head = 0;
+        self.count = new_count;
+    }
+
+    /// Check if a task is in the queue.
+    pub fn contains(&self, task: usize) -> bool {
+        for i in 0..self.count {
+            let idx = (self.head + i) % MAX_WAITERS;
+            if self.tasks[idx] == task { return true; }
+        }
+        false
+    }
+}
+
+/// An IPC endpoint. Multiple senders can queue, one receiver waits.
 pub struct Endpoint {
-    /// Task blocked waiting to send on this endpoint (None = no waiter)
-    pub sender: Option<usize>,
+    /// Circular queue of tasks blocked waiting to send on this endpoint
+    pub sender_queue: SenderQueue,
     /// Task blocked waiting to receive on this endpoint (None = no waiter)
     pub receiver: Option<usize>,
 }
 
 pub const EMPTY_EP: Endpoint = Endpoint {
-    sender: None,
+    sender_queue: SenderQueue { tasks: [0; MAX_WAITERS], head: 0, count: 0 },
     receiver: None,
 };
 
@@ -69,8 +128,11 @@ pub fn sys_send(frame: &mut TrapFrame, ep_id: usize) {
 
             // Sender continues (not blocked)
         } else {
-            // No receiver — block sender and wait
-            ENDPOINTS[ep_id].sender = Some(current);
+            // No receiver — enqueue sender and block
+            if !ENDPOINTS[ep_id].sender_queue.push(current) {
+                uart_print("!!! IPC: sender queue full\n");
+                return;
+            }
             sched::set_task_state(current, TaskState::Blocked);
             sched::schedule(frame);
         }
@@ -92,7 +154,7 @@ pub fn sys_recv(frame: &mut TrapFrame, ep_id: usize) {
         // Save current frame to TCB
         sched::save_frame(current, frame);
 
-        if let Some(send_task) = ENDPOINTS[ep_id].sender.take() {
+        if let Some(send_task) = ENDPOINTS[ep_id].sender_queue.pop() {
             // Sender is waiting — receive message directly
             copy_message(send_task, current);
 
@@ -134,8 +196,11 @@ pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
             sched::set_task_state(current, TaskState::Blocked);
             sched::schedule(frame);
         } else {
-            // No receiver — block as sender, will also need reply
-            ENDPOINTS[ep_id].sender = Some(current);
+            // No receiver — enqueue as sender, will also need reply
+            if !ENDPOINTS[ep_id].sender_queue.push(current) {
+                uart_print("!!! IPC: sender queue full\n");
+                return;
+            }
             sched::set_task_state(current, TaskState::Blocked);
             sched::schedule(frame);
         }
@@ -160,23 +225,13 @@ pub unsafe fn copy_message(from_task: usize, to_task: usize) {
 pub fn cleanup_task(task_idx: usize) {
     unsafe {
         for i in 0..MAX_ENDPOINTS {
-            // If the faulted task was a pending sender, clear the slot
-            if ENDPOINTS[i].sender == Some(task_idx) {
-                ENDPOINTS[i].sender = None;
-            }
+            // If the faulted task was a pending sender, remove from queue
+            ENDPOINTS[i].sender_queue.remove(task_idx);
 
             // If the faulted task was a pending receiver, clear the slot
             if ENDPOINTS[i].receiver == Some(task_idx) {
                 ENDPOINTS[i].receiver = None;
             }
         }
-
-        // Also check: is any other task Blocked because it was waiting
-        // for a rendezvous with the faulted task? In synchronous IPC,
-        // a task blocks *on an endpoint*, not on a specific partner.
-        // So if partner is blocked on ep.sender/receiver, it stays blocked
-        // until another task does the complementary operation.
-        // This is correct for synchronous IPC — partner will be unblocked
-        // when the faulted task restarts and re-enters IPC.
     }
 }
