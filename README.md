@@ -1,5 +1,5 @@
 # AegisOS
-
+[![Deploy Static Blog](https://github.com/maithanhduyan/aegis/actions/workflows/static-page.yml/badge.svg)](https://github.com/maithanhduyan/aegis/actions/workflows/static-page.yml)
 [![AegisOS CI](https://github.com/maithanhduyan/aegis/actions/workflows/ci.yml/badge.svg)](https://github.com/maithanhduyan/aegis/actions/workflows/ci.yml)
 
 **Bare-metal AArch64 microkernel for safety-critical systems.**

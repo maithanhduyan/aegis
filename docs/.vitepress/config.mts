@@ -5,6 +5,7 @@ export default defineConfig({
   title: 'AegisOS',
   description: 'Tài liệu dự án AegisOS — Microkernel AArch64 cho hệ thống an toàn tới hạn',
 
+  base: '/aegis/',
   cleanUrls: true,
   lastUpdated: true,
   ignoreDeadLinks: true,
