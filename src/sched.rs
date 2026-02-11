@@ -9,6 +9,7 @@
 ///
 /// Context switch: timer IRQ → save frame → pick next Ready → switch SP_EL1 → load frame → eret to EL0
 
+use crate::cap::CapBits;
 use crate::exception::TrapFrame;
 use crate::uart_print;
 
@@ -36,6 +37,7 @@ pub struct Tcb {
     pub entry_point: u64,     // original entry address (for restart)
     pub user_stack_top: u64,  // original SP_EL0 top (for restart)
     pub fault_tick: u64,      // tick when task was marked Faulted
+    pub caps: CapBits,        // capability bitmask (survives restart)
 }
 
 // ─── Static task table ─────────────────────────────────────────────
@@ -63,6 +65,7 @@ pub const EMPTY_TCB: Tcb = Tcb {
     entry_point: 0,
     user_stack_top: 0,
     fault_tick: 0,
+    caps: 0,
 };
 
 // ─── Public API ────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # Kế hoạch Phase F — Testing Infrastructure & CI
 
-> **Trạng thái: 📝 DRAFT** Xây dựng hạ tầng kiểm thử tự động cho AegisOS: unit test chạy trên host cho logic thuần, integration test chạy kernel thật trên QEMU + kiểm tra UART output, và CI pipeline trên GitHub Actions. Đây là nền tảng cho mọi verification trong tương lai (DO-178C §6.4, IEC 62304 §5.7).
+> **Trạng thái: ✅ HOÀN THÀNH** Xây dựng hạ tầng kiểm thử tự động cho AegisOS: unit test chạy trên host cho logic thuần, integration test chạy kernel thật trên QEMU + kiểm tra UART output, và CI pipeline trên GitHub Actions. Đây là nền tảng cho mọi verification trong tương lai (DO-178C §6.4, IEC 62304 §5.7).
 
 ---
 

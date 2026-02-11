@@ -367,6 +367,23 @@ pub extern "C" fn exception_dispatch_serror(_frame: &mut TrapFrame) {
 #[cfg(target_arch = "aarch64")]
 fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
     let syscall_nr = frame.x[7];
+    let ep_id = frame.x[6];
+
+    // ─── Phase G: Capability check ─────────────────────────────────
+    let required = crate::cap::cap_for_syscall(syscall_nr, ep_id);
+    let task_caps = unsafe { crate::sched::TCBS[crate::sched::CURRENT].caps };
+
+    if !crate::cap::cap_check(task_caps, required) {
+        uart_print("!!! CAP DENIED: task ");
+        uart_print_hex(unsafe { crate::sched::CURRENT } as u64);
+        uart_print(" syscall #");
+        uart_print_hex(syscall_nr);
+        uart_print(" needs ");
+        uart_print(crate::cap::cap_name(required));
+        uart_print(" — faulting\n");
+        crate::sched::fault_current_task(frame);
+        return;
+    }
 
     match syscall_nr {
         // SYS_YIELD = 0: voluntarily yield CPU

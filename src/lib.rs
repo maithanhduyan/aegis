@@ -8,6 +8,7 @@
 
 #![no_std]
 
+pub mod cap;
 pub mod uart;
 pub mod mmu;
 pub mod exception;

@@ -175,6 +175,18 @@ pub extern "C" fn kernel_main() -> ! {
         idle_entry as *const () as u64,
     );
 
+    // ─── Phase G: Assign capabilities ──────────────────────────────
+    unsafe {
+        use aegis_os::cap::*;
+        // Task 0 (task_a): PING client — needs CALL on EP0 + WRITE + YIELD
+        sched::TCBS[0].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD;
+        // Task 1 (task_b): PONG server — needs RECV/SEND on EP0 + WRITE + YIELD
+        sched::TCBS[1].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD;
+        // Task 2 (idle): only needs YIELD (WFI loop)
+        sched::TCBS[2].caps = CAP_YIELD;
+    }
+    uart_print("[AegisOS] capabilities assigned\n");
+
     timer::init(10);
 
     uart_print("[AegisOS] bootstrapping into task_a (EL0)...\n");

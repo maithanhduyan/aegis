@@ -21,6 +21,11 @@ use aegis_os::sched::{
     self, TaskState, Tcb, EMPTY_TCB, NUM_TASKS, RESTART_DELAY_TICKS,
 };
 use aegis_os::ipc::{self, EMPTY_EP, MAX_ENDPOINTS, MSG_REGS};
+use aegis_os::cap::{
+    self, CAP_IPC_SEND_EP0, CAP_IPC_RECV_EP0,
+    CAP_IPC_SEND_EP1, CAP_IPC_RECV_EP1, CAP_WRITE, CAP_YIELD,
+    CAP_ALL, CAP_NONE,
+};
 
 // ─── Helper: read CURRENT safely (avoids static_mut_refs warning) ──
 
@@ -695,4 +700,162 @@ fn ipc_max_endpoints() {
 fn ipc_endpoint_initial_state() {
     assert_eq!(EMPTY_EP.sender, None);
     assert_eq!(EMPTY_EP.receiver, None);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase G — Capability Access Control Tests
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── G1: Capability bit constants ──────────────────────────────────
+
+#[test]
+fn cap_bits_are_distinct_powers_of_two() {
+    let all = [
+        CAP_IPC_SEND_EP0, CAP_IPC_RECV_EP0,
+        CAP_IPC_SEND_EP1, CAP_IPC_RECV_EP1,
+        CAP_WRITE, CAP_YIELD,
+    ];
+    // Each must be a single bit (power of 2)
+    for &c in &all {
+        assert!(c != 0, "cap must be nonzero");
+        assert!(c & (c - 1) == 0, "cap 0x{:x} is not a power of 2", c);
+    }
+    // All must be distinct
+    for i in 0..all.len() {
+        for j in (i + 1)..all.len() {
+            assert_ne!(all[i], all[j], "caps at index {} and {} collide", i, j);
+        }
+    }
+}
+
+#[test]
+fn cap_all_includes_every_bit() {
+    assert!(cap::cap_check(CAP_ALL, CAP_IPC_SEND_EP0));
+    assert!(cap::cap_check(CAP_ALL, CAP_IPC_RECV_EP0));
+    assert!(cap::cap_check(CAP_ALL, CAP_IPC_SEND_EP1));
+    assert!(cap::cap_check(CAP_ALL, CAP_IPC_RECV_EP1));
+    assert!(cap::cap_check(CAP_ALL, CAP_WRITE));
+    assert!(cap::cap_check(CAP_ALL, CAP_YIELD));
+}
+
+#[test]
+fn cap_none_grants_nothing() {
+    assert!(!cap::cap_check(CAP_NONE, CAP_IPC_SEND_EP0));
+    assert!(!cap::cap_check(CAP_NONE, CAP_WRITE));
+    assert!(!cap::cap_check(CAP_NONE, CAP_YIELD));
+}
+
+// ─── G1: cap_check logic ──────────────────────────────────────────
+
+#[test]
+fn cap_check_single_bit() {
+    let caps = CAP_WRITE | CAP_YIELD;
+    assert!(cap::cap_check(caps, CAP_WRITE));
+    assert!(cap::cap_check(caps, CAP_YIELD));
+    assert!(!cap::cap_check(caps, CAP_IPC_SEND_EP0));
+}
+
+#[test]
+fn cap_check_multi_bit_requirement() {
+    let caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0;
+    // Has both → ok
+    assert!(cap::cap_check(caps, CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0));
+    // Has only send, needs both → fail
+    let only_send = CAP_IPC_SEND_EP0;
+    assert!(!cap::cap_check(only_send, CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0));
+}
+
+#[test]
+fn cap_check_zero_required_always_passes() {
+    // Requiring nothing → always passes (even with CAP_NONE)
+    assert!(cap::cap_check(CAP_NONE, 0));
+    assert!(cap::cap_check(CAP_ALL, 0));
+}
+
+// ─── G1: cap_for_syscall mapping ──────────────────────────────────
+
+#[test]
+fn cap_for_syscall_yield() {
+    assert_eq!(cap::cap_for_syscall(0, 0), CAP_YIELD);
+    assert_eq!(cap::cap_for_syscall(0, 99), CAP_YIELD); // ep_id ignored for yield
+}
+
+#[test]
+fn cap_for_syscall_send_recv() {
+    assert_eq!(cap::cap_for_syscall(1, 0), CAP_IPC_SEND_EP0);
+    assert_eq!(cap::cap_for_syscall(1, 1), CAP_IPC_SEND_EP1);
+    assert_eq!(cap::cap_for_syscall(2, 0), CAP_IPC_RECV_EP0);
+    assert_eq!(cap::cap_for_syscall(2, 1), CAP_IPC_RECV_EP1);
+}
+
+#[test]
+fn cap_for_syscall_call_needs_both() {
+    // SYS_CALL on EP0 needs SEND+RECV
+    let required = cap::cap_for_syscall(3, 0);
+    assert_eq!(required, CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0);
+    // SYS_CALL on EP1
+    let required1 = cap::cap_for_syscall(3, 1);
+    assert_eq!(required1, CAP_IPC_SEND_EP1 | CAP_IPC_RECV_EP1);
+}
+
+#[test]
+fn cap_for_syscall_write() {
+    assert_eq!(cap::cap_for_syscall(4, 0), CAP_WRITE);
+}
+
+#[test]
+fn cap_for_syscall_invalid_returns_zero() {
+    // Unknown syscall
+    assert_eq!(cap::cap_for_syscall(99, 0), 0);
+    // Invalid endpoint for IPC
+    assert_eq!(cap::cap_for_syscall(1, 5), 0);
+    assert_eq!(cap::cap_for_syscall(2, 5), 0);
+    assert_eq!(cap::cap_for_syscall(3, 5), 0);
+}
+
+// ─── G1: cap_name ─────────────────────────────────────────────────
+
+#[test]
+fn cap_name_returns_expected_strings() {
+    assert_eq!(cap::cap_name(CAP_IPC_SEND_EP0), "IPC_SEND_EP0");
+    assert_eq!(cap::cap_name(CAP_IPC_RECV_EP0), "IPC_RECV_EP0");
+    assert_eq!(cap::cap_name(CAP_WRITE), "WRITE");
+    assert_eq!(cap::cap_name(CAP_YIELD), "YIELD");
+    assert_eq!(cap::cap_name(CAP_ALL), "ALL");
+    assert_eq!(cap::cap_name(CAP_NONE), "NONE");
+    assert_eq!(cap::cap_name(0xFF), "UNKNOWN");
+}
+
+// ─── G3: Caps survive in EMPTY_TCB / TCB ──────────────────────────
+
+#[test]
+fn cap_empty_tcb_has_zero_caps() {
+    assert_eq!(EMPTY_TCB.caps, 0);
+}
+
+#[test]
+fn cap_survives_restart_simulation() {
+    // Simulate: assign caps to a task, then "restart" it (reset context
+    // fields like restart_task does, but don't touch caps).
+    unsafe {
+        reset_test_state();
+        let original_caps = CAP_IPC_SEND_EP0 | CAP_WRITE | CAP_YIELD;
+        sched::TCBS[0].caps = original_caps;
+        sched::TCBS[0].state = TaskState::Faulted;
+        sched::TCBS[0].fault_tick = 0;
+
+        // Simulate what restart_task() does: zero context, reload entry/stack
+        sched::TCBS[0].context = TrapFrame {
+            x: [0; 31],
+            sp_el0: sched::TCBS[0].user_stack_top,
+            elr_el1: sched::TCBS[0].entry_point,
+            spsr_el1: 0x000,
+            _pad: [0; 2],
+        };
+        sched::TCBS[0].state = TaskState::Ready;
+
+        // Caps must still be the original value
+        assert_eq!(sched::TCBS[0].caps, original_caps,
+            "caps must survive task restart");
+    }
 }
