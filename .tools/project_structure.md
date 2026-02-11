@@ -13,10 +13,12 @@
     ├── exception.rs
     ├── gic.rs
     ├── ipc.rs
+    ├── lib.rs
     ├── main.rs
     ├── mmu.rs
     ├── sched.rs
-    └── timer.rs
+    ├── timer.rs
+    └── uart.rs
 ```
 
 # Danh sách chi tiết các file:
@@ -143,6 +145,8 @@ SECTIONS
 ```
 [toolchain]
 channel = "nightly"
+components = ["rust-src"]
+targets = ["aarch64-unknown-none"]
 
 ```
 
@@ -263,7 +267,9 @@ at_el1:
 /// Full context save/restore (288-byte TrapFrame), ESR_EL1 dispatch,
 /// separate Sync/IRQ paths. TrapFrame layout is ABI-fixed for Phase C.
 
+#[cfg(target_arch = "aarch64")]
 use crate::uart_print;
+#[cfg(target_arch = "aarch64")]
 use crate::uart_print_hex;
 
 // ─── TrapFrame: ABI-fixed layout, 288 bytes ────────────────────────
@@ -291,6 +297,7 @@ pub const TRAPFRAME_SIZE: usize = 288;
 
 // ─── Exception vector table + save/restore macros ──────────────────
 
+#[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(r#"
 .section .text
 
@@ -571,6 +578,7 @@ _exc_serror_stub:
 
 /// Synchronous exception dispatch — called from assembly with TrapFrame pointer
 /// x0 = &mut TrapFrame, x1 = source (0=cur/SP_EL0, 1=cur/SP_ELx, 2=lower64)
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn exception_dispatch_sync(frame: &mut TrapFrame, source: u64) {
     let esr: u64;
@@ -588,6 +596,7 @@ pub extern "C" fn exception_dispatch_sync(frame: &mut TrapFrame, source: u64) {
 }
 
 /// IRQ dispatch — acknowledge GIC, dispatch by INTID, EOI
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn exception_dispatch_irq(frame: &mut TrapFrame) {
     let intid = crate::gic::acknowledge();
@@ -609,6 +618,7 @@ pub extern "C" fn exception_dispatch_irq(frame: &mut TrapFrame) {
 }
 
 /// SError dispatch — always fatal
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn exception_dispatch_serror(_frame: &mut TrapFrame) {
     uart_print("\n!!! SERROR (fatal) !!!\n");
@@ -618,6 +628,7 @@ pub extern "C" fn exception_dispatch_serror(_frame: &mut TrapFrame) {
 // ─── Individual exception handlers ─────────────────────────────────
 
 /// SVC handler — dispatch syscalls by x7
+#[cfg(target_arch = "aarch64")]
 fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
     let syscall_nr = frame.x[7];
 
@@ -644,32 +655,28 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
 /// SYS_WRITE handler: write bytes to UART on behalf of EL0 task.
 /// x0 = pointer to buffer, x1 = length in bytes.
 /// Validates that the buffer pointer is in user-accessible memory.
+#[cfg(target_arch = "aarch64")]
 fn handle_sys_write(frame: &TrapFrame) {
     let buf_ptr = frame.x[0] as usize;
     let len = frame.x[1] as usize;
 
-    // Validate: max 256 bytes per write, non-zero length
-    if len == 0 || len > 256 {
-        return;
-    }
-
-    // Validate: buffer must be in the kernel image range (shared code/rodata)
-    // or in user stack range. For now, allow any address in the identity-mapped
-    // RAM region (0x4000_0000 – 0x4800_0000) since all tasks share address space.
-    let buf_end = buf_ptr.wrapping_add(len);
-    if buf_ptr < 0x4000_0000 || buf_end > 0x4800_0000 || buf_end < buf_ptr {
-        uart_print("!!! SYS_WRITE: bad pointer !!!\n");
+    let (valid, checked_len) = validate_write_args(buf_ptr, len);
+    if !valid {
+        if len > 0 {
+            uart_print("!!! SYS_WRITE: bad pointer !!!\n");
+        }
         return;
     }
 
     // Safe to read — copy bytes to UART
-    for i in 0..len {
+    for i in 0..checked_len {
         let byte = unsafe { core::ptr::read_volatile((buf_ptr + i) as *const u8) };
         crate::uart_write(byte);
     }
 }
 
 /// Instruction Abort handler — fault task if from lower EL, halt if from same EL
+#[cfg(target_arch = "aarch64")]
 fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
@@ -711,6 +718,7 @@ fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
 }
 
 /// Data Abort handler — fault task if from lower EL, halt if from same EL
+#[cfg(target_arch = "aarch64")]
 fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
@@ -764,6 +772,7 @@ fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
 }
 
 /// FP/SIMD trap — fault task if from lower EL, halt if from same EL
+#[cfg(target_arch = "aarch64")]
 fn handle_fp_trap(frame: &mut TrapFrame, esr: u64, source: u64) {
     uart_print("\n!!! FP/SIMD TRAP !!!");
     if source == 2 {
@@ -786,6 +795,7 @@ fn handle_fp_trap(frame: &mut TrapFrame, esr: u64, source: u64) {
 }
 
 /// Unknown/unhandled exception class — fault task if from lower EL, halt if same EL
+#[cfg(target_arch = "aarch64")]
 fn handle_unknown(frame: &mut TrapFrame, esr: u64, ec: u64, source: u64) {
     uart_print("\n!!! UNHANDLED EXCEPTION !!!");
     if source == 2 {
@@ -816,6 +826,7 @@ fn handle_unknown(frame: &mut TrapFrame, esr: u64, ec: u64, source: u64) {
 }
 
 /// Decode fault status code (DFSC/IFSC) bits [5:0] into human-readable class
+#[cfg(target_arch = "aarch64")]
 fn print_fault_class(fsc: u64) {
     let level = fsc & 0x3;
     match (fsc >> 2) & 0xF {
@@ -841,6 +852,7 @@ fn print_fault_class(fsc: u64) {
 // ─── Init ──────────────────────────────────────────────────────────
 
 /// Install exception vector table — write VBAR_EL1
+#[cfg(target_arch = "aarch64")]
 pub fn init() {
     extern "C" {
         static __exception_vectors: u8;
@@ -854,6 +866,21 @@ pub fn init() {
             options(nomem, nostack)
         );
     }
+}
+
+// ─── Pure validation logic (testable on host) ──────────────────────
+
+/// Validate a SYS_WRITE pointer+length from EL0.
+/// Returns (valid, clamped_len). Pure function — no side effects.
+pub fn validate_write_args(buf_ptr: usize, len: usize) -> (bool, usize) {
+    if len == 0 || len > 256 {
+        return (false, 0);
+    }
+    let buf_end = buf_ptr.wrapping_add(len);
+    if buf_ptr < 0x4000_0000 || buf_end > 0x4800_0000 || buf_end < buf_ptr {
+        return (false, 0);
+    }
+    (true, len)
 }
 
 ```
@@ -966,7 +993,7 @@ pub const INTID_SPURIOUS: u32 = 1023;
 ## File ./src\ipc.rs:
 ```rust
 /// AegisOS IPC — Synchronous Endpoint-based messaging
-///
+/// Inter-Process Communication (IPC) Giao tiếp đồng bộ giữa các tiến trình qua các endpoint.
 /// Synchronous IPC: sender blocks until receiver is ready and vice versa.
 /// Message payload: x[0]..x[3] in TrapFrame (4 × u64 = 32 bytes).
 ///
@@ -988,26 +1015,26 @@ pub const SYS_RECV: u64 = 2;
 #[allow(dead_code)]
 pub const SYS_CALL: u64 = 3;
 
-const MAX_ENDPOINTS: usize = 2;
-const MSG_REGS: usize = 4; // x[0]..x[3]
+pub const MAX_ENDPOINTS: usize = 2;
+pub const MSG_REGS: usize = 4; // x[0]..x[3]
 
 // ─── Endpoint ──────────────────────────────────────────────────────
 
 /// An IPC endpoint. One task can be waiting to send, one to receive.
 /// For simplicity: single-slot (one waiter per direction).
-struct Endpoint {
+pub struct Endpoint {
     /// Task blocked waiting to send on this endpoint (None = no waiter)
-    sender: Option<usize>,
+    pub sender: Option<usize>,
     /// Task blocked waiting to receive on this endpoint (None = no waiter)
-    receiver: Option<usize>,
+    pub receiver: Option<usize>,
 }
 
-const EMPTY_EP: Endpoint = Endpoint {
+pub const EMPTY_EP: Endpoint = Endpoint {
     sender: None,
     receiver: None,
 };
 
-static mut ENDPOINTS: [Endpoint; MAX_ENDPOINTS] = [EMPTY_EP; MAX_ENDPOINTS];
+pub static mut ENDPOINTS: [Endpoint; MAX_ENDPOINTS] = [EMPTY_EP; MAX_ENDPOINTS];
 
 // ─── IPC operations ────────────────────────────────────────────────
 
@@ -1112,7 +1139,7 @@ pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
 // ─── Helpers ───────────────────────────────────────────────────────
 
 /// Copy message registers x[0]..x[3] from sender's TCB to receiver's TCB.
-unsafe fn copy_message(from_task: usize, to_task: usize) {
+pub unsafe fn copy_message(from_task: usize, to_task: usize) {
     for i in 0..MSG_REGS {
         let val = sched::get_task_reg(from_task, i);
         sched::set_task_reg(to_task, i, val);
@@ -1150,49 +1177,68 @@ pub fn cleanup_task(task_idx: usize) {
 
 ```
 
+## File ./src\lib.rs:
+```rust
+//! AegisOS — Kernel library crate
+//!
+//! Re-exports kernel modules so they can be used by both the kernel
+//! binary (main.rs) and host-side unit tests (tests/host_tests.rs).
+//!
+//! On AArch64: full kernel with asm, MMIO, linker symbols.
+//! On host (x86_64): only pure logic available (types, constants, validation).
+
+#![no_std]
+
+pub mod uart;
+pub mod mmu;
+pub mod exception;
+pub mod sched;
+pub mod ipc;
+pub mod timer;
+
+#[cfg(target_arch = "aarch64")]
+pub mod gic;
+
+// Re-export common UART functions at crate root for convenience
+pub use uart::{uart_write, uart_print, uart_print_hex};
+
+```
+
 ## File ./src\main.rs:
 ```rust
-#![no_std]
-#![no_main]
+// AegisOS — Kernel binary entry point
+// This entire file is AArch64-only. When building for host tests (x86_64),
+// the content is gated off and only the lib crate is tested.
 
+// On AArch64: full kernel binary with boot asm, syscall wrappers, tasks
+#![cfg_attr(target_arch = "aarch64", no_std)]
+#![cfg_attr(target_arch = "aarch64", no_main)]
+
+// On host (x86_64): empty bin that does nothing (tests use --lib --test)
+#![cfg_attr(not(target_arch = "aarch64"), allow(unused))]
+
+#[cfg(target_arch = "aarch64")]
 use core::panic::PanicInfo;
-use core::ptr;
 
-mod mmu;
-mod exception;
-mod gic;
-mod timer;
-mod sched;
-mod ipc;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::uart_print;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::exception;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::sched;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::timer;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::gic;
 
 // Boot assembly — inline vào binary thông qua global_asm!
+#[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(include_str!("boot.s"));
-
-/// UART0 PL011 data register trên QEMU virt machine
-const UART0: *mut u8 = 0x0900_0000 as *mut u8;
-
-pub fn uart_write(byte: u8) {
-    unsafe { ptr::write_volatile(UART0, byte) }
-}
-
-pub fn uart_print(s: &str) {
-    for b in s.bytes() {
-        uart_write(b);
-    }
-}
-
-/// Print a u64 value as hexadecimal
-pub fn uart_print_hex(val: u64) {
-    let hex = b"0123456789ABCDEF";
-    for i in (0..16).rev() {
-        let nibble = ((val >> (i * 4)) & 0xF) as usize;
-        uart_write(hex[nibble]);
-    }
-}
 
 // ─── Syscall wrappers ──────────────────────────────────────────────
 
 /// SYS_YIELD (syscall #0): voluntarily yield the CPU to the next task.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_yield() {
     unsafe {
@@ -1206,7 +1252,7 @@ pub fn syscall_yield() {
 }
 
 /// SYS_SEND (syscall #1): send message on endpoint.
-/// msg[0..4] in x0..x3, ep_id in x6, syscall# in x7.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_send(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) {
     unsafe {
@@ -1224,7 +1270,7 @@ pub fn syscall_send(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) {
 }
 
 /// SYS_RECV (syscall #2): receive message from endpoint.
-/// Returns msg[0] (first message word).
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_recv(ep_id: u64) -> u64 {
     let msg0: u64;
@@ -1241,7 +1287,7 @@ pub fn syscall_recv(ep_id: u64) -> u64 {
 }
 
 /// SYS_CALL (syscall #3): send message then wait for reply.
-/// Returns msg[0] from reply.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
     let reply0: u64;
@@ -1262,8 +1308,7 @@ pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
 }
 
 /// SYS_WRITE (syscall #4): write string to UART via kernel.
-/// buf = pointer to string data, len = byte count.
-/// Used by EL0 tasks that cannot access UART directly.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_write(buf: *const u8, len: usize) {
     unsafe {
@@ -1278,6 +1323,7 @@ pub fn syscall_write(buf: *const u8, len: usize) {
 }
 
 /// Print a string from EL0 via SYS_WRITE syscall
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn user_print(s: &str) {
     syscall_write(s.as_ptr(), s.len());
@@ -1286,28 +1332,28 @@ pub fn user_print(s: &str) {
 // ─── Task entry points ─────────────────────────────────────────────
 
 /// Task A (client): send "PING" on EP 0, receive reply
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn task_a_entry() -> ! {
     loop {
-        // Send PING (msg[0] = 0x50494E47 = "PING" in ASCII hex)
         user_print("A:PING ");
         syscall_call(0, 0x50494E47, 0, 0, 0);
     }
 }
 
 /// Task B (server): receive on EP 0, send PONG reply
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn task_b_entry() -> ! {
     loop {
-        // Receive message
         let _msg = syscall_recv(0);
         user_print("B:PONG ");
-        // Reply by sending back on same endpoint
         syscall_send(0, 0x504F4E47, 0, 0, 0); // "PONG"
     }
 }
 
 /// Idle task: just wfi in a loop
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn idle_entry() -> ! {
     loop {
@@ -1317,44 +1363,42 @@ pub extern "C" fn idle_entry() -> ! {
 
 // ─── Kernel main ───────────────────────────────────────────────────
 
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
     uart_print("\n[AegisOS] boot\n");
     uart_print("[AegisOS] MMU enabled (identity map)\n");
     uart_print("[AegisOS] W^X enforced (WXN + 4KB pages)\n");
 
-    // Install exception vector table
     exception::init();
     uart_print("[AegisOS] exceptions ready\n");
 
-    // Initialize GIC + enable timer interrupt
     gic::init();
     gic::set_priority(timer::TIMER_INTID, 0);
     gic::enable_intid(timer::TIMER_INTID);
 
-    // Initialize scheduler with task entry points
     sched::init(
         task_a_entry as *const () as u64,
         task_b_entry as *const () as u64,
         idle_entry as *const () as u64,
     );
 
-    // Start timer: 10ms periodic tick (IRQ still masked — won't fire yet)
     timer::init(10);
 
     uart_print("[AegisOS] bootstrapping into task_a (EL0)...\n");
-
-    // Bootstrap: load task_a context and eret into it — never returns.
-    // The eret restores SPSR = 0x000 (EL0t), dropping to user mode.
-    // SAVE_CONTEXT_LOWER reloads SP to __stack_end on every exception entry.
     sched::bootstrap();
 }
 
+#[cfg(target_arch = "aarch64")]
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     uart_print("PANIC\n");
     loop {}
 }
+
+// On host target: provide a main() so the bin target compiles
+#[cfg(not(target_arch = "aarch64"))]
+fn main() {}
 
 ```
 
@@ -1366,89 +1410,91 @@ fn panic(_: &PanicInfo) -> ! {
 /// Sub-phase 1: Identity map with 2 MiB blocks
 /// Sub-phase 2: Refine to 4KB pages for kernel region, W^X enforcement
 
+#[cfg(target_arch = "aarch64")]
 use core::ptr;
 
 // ─── Descriptor bits ───────────────────────────────────────────────
 
 /// L1/L2 table descriptor — points to next-level table
-const TABLE: u64 = 0b11;
+pub const TABLE: u64 = 0b11;
 
 /// L1/L2 block descriptor — maps a large region directly
-const BLOCK: u64 = 0b01;
+pub const BLOCK: u64 = 0b01;
 
 /// L3 page descriptor
-const PAGE: u64 = 0b11;
+pub const PAGE: u64 = 0b11;
 
 // AttrIndx — index into MAIR_EL1 (bits [4:2])
 /// MAIR index 0 = Device-nGnRnE (UART, GIC)
-const ATTR_DEVICE: u64 = 0 << 2;
+pub const ATTR_DEVICE: u64 = 0 << 2;
 /// MAIR index 1 = Normal Non-Cacheable
 #[allow(dead_code)]
-const ATTR_NORMAL_NC: u64 = 1 << 2;
+pub const ATTR_NORMAL_NC: u64 = 1 << 2;
 /// MAIR index 2 = Normal Write-Back (kernel code/data/stack)
-const ATTR_NORMAL_WB: u64 = 2 << 2;
+pub const ATTR_NORMAL_WB: u64 = 2 << 2;
 
 // Access Permission (bits [7:6])
 /// EL1 Read-Write, EL0 No Access
-const AP_RW_EL1: u64 = 0b00 << 6;
+pub const AP_RW_EL1: u64 = 0b00 << 6;
 /// EL1 Read-Only, EL0 No Access
 #[allow(dead_code)]
-const AP_RO_EL1: u64 = 0b10 << 6;
+pub const AP_RO_EL1: u64 = 0b10 << 6;
 /// EL1 Read-Write, EL0 Read-Write
-const AP_RW_EL0: u64 = 0b01 << 6;
+pub const AP_RW_EL0: u64 = 0b01 << 6;
 /// EL1 Read-Only, EL0 Read-Only
 #[allow(dead_code)]
-const AP_RO_EL0: u64 = 0b11 << 6;
+pub const AP_RO_EL0: u64 = 0b11 << 6;
 
 // Shareability (bits [9:8])
 #[allow(dead_code)]
-const SH_NON: u64 = 0b00 << 8;
-const SH_INNER: u64 = 0b11 << 8;
+pub const SH_NON: u64 = 0b00 << 8;
+pub const SH_INNER: u64 = 0b11 << 8;
 
 /// Access Flag — MUST be 1 (Cortex-A53 has no HW AF management)
-const AF: u64 = 1 << 10;
+pub const AF: u64 = 1 << 10;
 
 /// Privileged Execute Never
-const PXN: u64 = 1 << 53;
+pub const PXN: u64 = 1 << 53;
 /// Unprivileged Execute Never
-const UXN: u64 = 1 << 54;
+pub const UXN: u64 = 1 << 54;
 /// Combined: no execution at any privilege level
-const XN: u64 = PXN | UXN;
+pub const XN: u64 = PXN | UXN;
 
 // ─── Composed descriptor templates ────────────────────────────────
 
 /// Device MMIO: Device-nGnRnE, RW, non-executable, AF=1
-const DEVICE_BLOCK: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | XN;
+pub const DEVICE_BLOCK: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | XN;
 
 /// Normal RAM: Write-Back, RW, Inner Shareable, AF=1 (executable for sub-phase 1)
-const RAM_BLOCK: u64 = BLOCK | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF;
+pub const RAM_BLOCK: u64 = BLOCK | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF;
 
 /// Kernel code page: Normal WB, RO, executable, Inner Shareable, AF=1
 #[allow(dead_code)]
-const KERNEL_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL1 | SH_INNER | AF;
+pub const KERNEL_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL1 | SH_INNER | AF;
 
 /// Kernel rodata page: Normal WB, RO (EL0+EL1), non-executable, Inner Shareable, AF=1
 /// Must be EL0-accessible because EL0 tasks reference string literals in .rodata
-const KERNEL_RODATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | XN;
+pub const KERNEL_RODATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | XN;
 
 /// Kernel data/bss/stack page: Normal WB, RW, non-executable, Inner Shareable, AF=1
-const KERNEL_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF | XN;
+pub const KERNEL_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF | XN;
 
 /// User data/stack page: Normal WB, RW (EL0+EL1), non-executable, Inner Shareable, AF=1
-const USER_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL0 | SH_INNER | AF | XN;
+pub const USER_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL0 | SH_INNER | AF | XN;
 
 /// User code page: Normal WB, RO (EL0+EL1), EL0-executable (UXN=0), PXN=1, Inner Shareable, AF=1
 /// PXN prevents kernel from executing user code; UXN=0 allows EL0 execution
 #[allow(dead_code)]
-const USER_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | PXN;
+pub const USER_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | PXN;
 
 /// Shared code page: Normal WB, RO (EL0+EL1), executable by both EL1 and EL0
 /// Used for .text section where kernel and task code coexist
-const SHARED_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF;
+pub const SHARED_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF;
 
 // ─── MAIR / TCR constants ─────────────────────────────────────────
 
 /// MAIR_EL1: idx0=Device-nGnRnE(0x00), idx1=Normal-NC(0x44), idx2=Normal-WB(0xFF), idx3=Device-nGnRE(0x04)
+#[cfg(target_arch = "aarch64")]
 const MAIR_VALUE: u64 = 0x00000000_04FF4400;
 
 /// TCR_EL1 for 39-bit VA, 4KB granule, TTBR0 only
@@ -1460,6 +1506,7 @@ const MAIR_VALUE: u64 = 0x00000000_04FF4400;
 ///   T1SZ=25 (bits[21:16])      → (unused, EPD1=1)
 ///   EPD1=1 (bit[23])           → Disable TTBR1 walks
 ///   IPS=0b101 (bits[34:32])    → 48-bit PA
+#[cfg(target_arch = "aarch64")]
 const TCR_VALUE: u64 =
       25                      // T0SZ
     | (0b01 << 8)             // IRGN0
@@ -1475,6 +1522,7 @@ const TCR_VALUE: u64 =
     | (0b101_u64 << 32);      // IPS = 48-bit
 
 /// SCTLR_EL1 bits to SET for MMU enable
+#[cfg(target_arch = "aarch64")]
 const SCTLR_MMU_ON: u64 =
       (1 << 0)   // M   — MMU enable
     | (1 << 2)   // C   — Data cache enable
@@ -1482,11 +1530,13 @@ const SCTLR_MMU_ON: u64 =
     | (1 << 12); // I   — Instruction cache enable
 
 /// SCTLR_EL1.WXN (bit 19) — Write XOR Execute, for sub-phase 2
+#[cfg(target_arch = "aarch64")]
 const SCTLR_WXN: u64 = 1 << 19;
 
-// ─── Page table storage ────────────────────────────────────────────
+// ─── Page table storage (AArch64 only) ─────────────────────────────
 
 // Linker-provided symbols for page table memory (in .page_tables section)
+#[cfg(target_arch = "aarch64")]
 extern "C" {
     static __page_tables_start: u8;
     static __text_start: u8;
@@ -1507,12 +1557,14 @@ extern "C" {
 }
 
 /// Get address of a linker symbol as usize
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn sym_addr(sym: &u8) -> usize {
     sym as *const u8 as usize
 }
 
 /// Pointer to one of the 4 page tables (each 512 × u64 = 4096 bytes)
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn table_ptr(index: usize) -> *mut u64 {
     unsafe {
@@ -1522,6 +1574,7 @@ fn table_ptr(index: usize) -> *mut u64 {
 }
 
 /// Write a page table entry
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn write_entry(table: *mut u64, index: usize, value: u64) {
     ptr::write_volatile(table.add(index), value);
@@ -1532,6 +1585,7 @@ unsafe fn write_entry(table: *mut u64, index: usize, value: u64) {
 /// Initialize page tables: identity map devices + RAM with 2 MiB blocks
 ///
 /// Layout:
+#[cfg(target_arch = "aarch64")]
 ///   L1[0] → L2_device (covers 0x0000_0000 – 0x3FFF_FFFF)
 ///   L1[1] → L2_ram    (covers 0x4000_0000 – 0x7FFF_FFFF)
 ///
@@ -1569,6 +1623,7 @@ unsafe fn init_tables_2mib() {
 // ─── Sub-phase 2: Refine kernel 2MiB to 4KB pages with W^X ────────
 
 /// Replace L2_ram[0] (first 2MiB at 0x4000_0000) with L3 table for fine-grained permissions
+#[cfg(target_arch = "aarch64")]
 unsafe fn refine_kernel_pages() {
     let l2_ram = table_ptr(2);
     let l3_kernel = table_ptr(3);
@@ -1618,6 +1673,7 @@ unsafe fn refine_kernel_pages() {
 }
 
 /// Mark the stack guard page as invalid (causes Data Abort on stack overflow)
+#[cfg(target_arch = "aarch64")]
 unsafe fn set_guard_page() {
     let l3_kernel = table_ptr(3);
     let guard_addr = sym_addr(&__stack_guard);
@@ -1633,6 +1689,7 @@ unsafe fn set_guard_page() {
 // ─── MMU enable sequence (called from assembly) ───────────────────
 
 /// Full MMU initialization — called from boot.s after BSS clear
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_init() {
     // Sub-phase 1: Build 2MiB identity map
@@ -1655,6 +1712,7 @@ pub unsafe extern "C" fn mmu_init() {
 /// Enable MMU — called from assembly after mmu_init()
 /// This is kept in Rust for the register constant values, but the actual
 /// MSR sequence is in boot.s for precise control over instruction ordering.
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_get_config(out: *mut [u64; 4]) {
     let l1 = table_ptr(0);
@@ -1684,7 +1742,7 @@ use crate::uart_print;
 
 // ─── Task state ────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(u8)]
 pub enum TaskState {
     Inactive = 0,
@@ -1711,15 +1769,15 @@ pub struct Tcb {
 // ─── Static task table ─────────────────────────────────────────────
 
 /// 3 tasks: 0 = task_a, 1 = task_b, 2 = idle
-const NUM_TASKS: usize = 3;
+pub const NUM_TASKS: usize = 3;
 
-static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
-static mut CURRENT: usize = 0;
+pub static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
+pub static mut CURRENT: usize = 0;
 
 /// Delay before auto-restarting a faulted task (100 ticks × 10ms = 1 second)
-const RESTART_DELAY_TICKS: u64 = 100;
+pub const RESTART_DELAY_TICKS: u64 = 100;
 
-const EMPTY_TCB: Tcb = Tcb {
+pub const EMPTY_TCB: Tcb = Tcb {
     context: TrapFrame {
         x: [0; 31],
         sp_el0: 0,
@@ -1739,6 +1797,7 @@ const EMPTY_TCB: Tcb = Tcb {
 
 /// Initialize scheduler: set up TCBs for task_a, task_b, idle.
 /// Must be called before enabling timer interrupts.
+#[cfg(target_arch = "aarch64")]
 pub fn init(
     task_a_entry: u64,
     task_b_entry: u64,
@@ -1927,7 +1986,7 @@ pub fn fault_current_task(frame: &mut TrapFrame) {
 
 /// Restart a faulted task: zero context, reload entry point + stack, mark Ready.
 /// Called from schedule() when restart delay has elapsed.
-fn restart_task(task_idx: usize) {
+pub fn restart_task(task_idx: usize) {
     unsafe {
         if TCBS[task_idx].state != TaskState::Faulted {
             return;
@@ -1936,9 +1995,13 @@ fn restart_task(task_idx: usize) {
         let id = TCBS[task_idx].id;
 
         // Zero user stack (4KB) to prevent state leakage
-        let ustack_top = TCBS[task_idx].user_stack_top;
-        let ustack_base = (ustack_top - 4096) as *mut u8;
-        core::ptr::write_bytes(ustack_base, 0, 4096);
+        // Only on AArch64 — on host tests, user_stack_top is a fake address
+        #[cfg(target_arch = "aarch64")]
+        {
+            let ustack_top = TCBS[task_idx].user_stack_top;
+            let ustack_base = (ustack_top - 4096) as *mut u8;
+            core::ptr::write_bytes(ustack_base, 0, 4096);
+        }
 
         // Zero entire TrapFrame
         core::ptr::write_bytes(
@@ -1950,7 +2013,7 @@ fn restart_task(task_idx: usize) {
         // Reload entry point, stack, SPSR
         TCBS[task_idx].context.elr_el1 = TCBS[task_idx].entry_point;
         TCBS[task_idx].context.spsr_el1 = 0x000; // EL0t
-        TCBS[task_idx].context.sp_el0 = ustack_top;
+        TCBS[task_idx].context.sp_el0 = TCBS[task_idx].user_stack_top;
 
         TCBS[task_idx].state = TaskState::Ready;
 
@@ -1967,6 +2030,7 @@ fn restart_task(task_idx: usize) {
 /// SP_EL1 stays at __stack_end (the shared kernel boot stack).
 /// SAVE_CONTEXT_LOWER reloads SP to __stack_end on every exception
 /// entry, so the bootstrap SP value doesn't matter after this point.
+#[cfg(target_arch = "aarch64")]
 pub fn bootstrap() -> ! {
     unsafe {
         TCBS[0].state = TaskState::Running;
@@ -2002,19 +2066,22 @@ pub fn bootstrap() -> ! {
 /// Uses the EL1 Physical Timer (CNTP) with PPI INTID 30.
 /// QEMU virt timer frequency: 62,500,000 Hz (62.5 MHz).
 
+#[cfg(target_arch = "aarch64")]
 use crate::uart_print;
 
 /// GIC INTID for EL1 Physical Timer (PPI 14)
 pub const TIMER_INTID: u32 = 30;
 
 /// Tick interval in ticks (computed at init)
+#[cfg(target_arch = "aarch64")]
 static mut TICK_INTERVAL: u64 = 0;
 
 /// Monotonic tick counter
-static mut TICK_COUNT: u64 = 0;
+pub static mut TICK_COUNT: u64 = 0;
 
 /// Initialize timer for periodic ticks
 /// `tick_ms` = interval in milliseconds (e.g., 10 for 10ms)
+#[cfg(target_arch = "aarch64")]
 pub fn init(tick_ms: u32) {
     let freq: u64;
     unsafe {
@@ -2052,6 +2119,7 @@ pub fn init(tick_ms: u32) {
 }
 
 /// Re-arm timer — call from IRQ handler
+#[cfg(target_arch = "aarch64")]
 pub fn rearm() {
     let ticks = unsafe { TICK_INTERVAL };
     unsafe {
@@ -2064,6 +2132,7 @@ pub fn rearm() {
 }
 
 /// Timer tick handler — called from IRQ dispatch with TrapFrame
+#[cfg(target_arch = "aarch64")]
 pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
     unsafe { TICK_COUNT += 1; }
 
@@ -2081,6 +2150,7 @@ pub fn tick_count() -> u64 {
 }
 
 /// Simple decimal printer for small numbers
+#[cfg(target_arch = "aarch64")]
 fn print_decimal(mut val: u32) {
     if val == 0 {
         crate::uart_write(b'0');
@@ -2096,6 +2166,48 @@ fn print_decimal(mut val: u32) {
     while i > 0 {
         i -= 1;
         crate::uart_write(buf[i]);
+    }
+}
+
+```
+
+## File ./src\uart.rs:
+```rust
+/// AegisOS UART driver — PL011 on QEMU virt machine
+///
+/// UART0 data register at 0x0900_0000. Write-only for simplicity.
+/// On host (non-AArch64), UART functions are no-ops for testing.
+
+#[cfg(target_arch = "aarch64")]
+use core::ptr;
+
+/// UART0 PL011 data register on QEMU virt machine
+#[cfg(target_arch = "aarch64")]
+const UART0: *mut u8 = 0x0900_0000 as *mut u8;
+
+/// Write a single byte to UART
+#[cfg(target_arch = "aarch64")]
+pub fn uart_write(byte: u8) {
+    unsafe { ptr::write_volatile(UART0, byte) }
+}
+
+/// No-op on host (tests don't have UART)
+#[cfg(not(target_arch = "aarch64"))]
+pub fn uart_write(_byte: u8) {}
+
+/// Print a string to UART
+pub fn uart_print(s: &str) {
+    for b in s.bytes() {
+        uart_write(b);
+    }
+}
+
+/// Print a u64 value as hexadecimal to UART
+pub fn uart_print_hex(val: u64) {
+    let hex = b"0123456789ABCDEF";
+    for i in (0..16).rev() {
+        let nibble = ((val >> (i * 4)) & 0xF) as usize;
+        uart_write(hex[nibble]);
     }
 }
 

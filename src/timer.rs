@@ -4,19 +4,22 @@
 /// Uses the EL1 Physical Timer (CNTP) with PPI INTID 30.
 /// QEMU virt timer frequency: 62,500,000 Hz (62.5 MHz).
 
+#[cfg(target_arch = "aarch64")]
 use crate::uart_print;
 
 /// GIC INTID for EL1 Physical Timer (PPI 14)
 pub const TIMER_INTID: u32 = 30;
 
 /// Tick interval in ticks (computed at init)
+#[cfg(target_arch = "aarch64")]
 static mut TICK_INTERVAL: u64 = 0;
 
 /// Monotonic tick counter
-static mut TICK_COUNT: u64 = 0;
+pub static mut TICK_COUNT: u64 = 0;
 
 /// Initialize timer for periodic ticks
 /// `tick_ms` = interval in milliseconds (e.g., 10 for 10ms)
+#[cfg(target_arch = "aarch64")]
 pub fn init(tick_ms: u32) {
     let freq: u64;
     unsafe {
@@ -54,6 +57,7 @@ pub fn init(tick_ms: u32) {
 }
 
 /// Re-arm timer — call from IRQ handler
+#[cfg(target_arch = "aarch64")]
 pub fn rearm() {
     let ticks = unsafe { TICK_INTERVAL };
     unsafe {
@@ -66,6 +70,7 @@ pub fn rearm() {
 }
 
 /// Timer tick handler — called from IRQ dispatch with TrapFrame
+#[cfg(target_arch = "aarch64")]
 pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
     unsafe { TICK_COUNT += 1; }
 
@@ -83,6 +88,7 @@ pub fn tick_count() -> u64 {
 }
 
 /// Simple decimal printer for small numbers
+#[cfg(target_arch = "aarch64")]
 fn print_decimal(mut val: u32) {
     if val == 0 {
         crate::uart_write(b'0');

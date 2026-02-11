@@ -6,6 +6,14 @@ rustflags = [
   "-C", "link-arg=-Tlinker.ld",
 ]
 
-[unstable]
-build-std = ["core"]
-build-std-features = ["compiler-builtins-mem"]
+# build-std is set via CARGO_UNSTABLE_BUILD_STD env var or -Z flag
+# so it only applies to AArch64 builds, not host tests.
+# Build command: cargo build --release -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem
+# Test command:  cargo test --target x86_64-pc-windows-msvc --lib --tests
+
+# Host target for tests — no build-std, no custom linker
+[target.x86_64-pc-windows-msvc]
+rustflags = []
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = []

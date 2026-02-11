@@ -1,5 +1,5 @@
 /// AegisOS IPC — Synchronous Endpoint-based messaging
-///
+/// Inter-Process Communication (IPC) Giao tiếp đồng bộ giữa các tiến trình qua các endpoint.
 /// Synchronous IPC: sender blocks until receiver is ready and vice versa.
 /// Message payload: x[0]..x[3] in TrapFrame (4 × u64 = 32 bytes).
 ///
@@ -21,26 +21,26 @@ pub const SYS_RECV: u64 = 2;
 #[allow(dead_code)]
 pub const SYS_CALL: u64 = 3;
 
-const MAX_ENDPOINTS: usize = 2;
-const MSG_REGS: usize = 4; // x[0]..x[3]
+pub const MAX_ENDPOINTS: usize = 2;
+pub const MSG_REGS: usize = 4; // x[0]..x[3]
 
 // ─── Endpoint ──────────────────────────────────────────────────────
 
 /// An IPC endpoint. One task can be waiting to send, one to receive.
 /// For simplicity: single-slot (one waiter per direction).
-struct Endpoint {
+pub struct Endpoint {
     /// Task blocked waiting to send on this endpoint (None = no waiter)
-    sender: Option<usize>,
+    pub sender: Option<usize>,
     /// Task blocked waiting to receive on this endpoint (None = no waiter)
-    receiver: Option<usize>,
+    pub receiver: Option<usize>,
 }
 
-const EMPTY_EP: Endpoint = Endpoint {
+pub const EMPTY_EP: Endpoint = Endpoint {
     sender: None,
     receiver: None,
 };
 
-static mut ENDPOINTS: [Endpoint; MAX_ENDPOINTS] = [EMPTY_EP; MAX_ENDPOINTS];
+pub static mut ENDPOINTS: [Endpoint; MAX_ENDPOINTS] = [EMPTY_EP; MAX_ENDPOINTS];
 
 // ─── IPC operations ────────────────────────────────────────────────
 
@@ -145,7 +145,7 @@ pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
 // ─── Helpers ───────────────────────────────────────────────────────
 
 /// Copy message registers x[0]..x[3] from sender's TCB to receiver's TCB.
-unsafe fn copy_message(from_task: usize, to_task: usize) {
+pub unsafe fn copy_message(from_task: usize, to_task: usize) {
     for i in 0..MSG_REGS {
         let val = sched::get_task_reg(from_task, i);
         sched::set_task_reg(to_task, i, val);

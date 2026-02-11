@@ -3,7 +3,9 @@
 /// Full context save/restore (288-byte TrapFrame), ESR_EL1 dispatch,
 /// separate Sync/IRQ paths. TrapFrame layout is ABI-fixed for Phase C.
 
+#[cfg(target_arch = "aarch64")]
 use crate::uart_print;
+#[cfg(target_arch = "aarch64")]
 use crate::uart_print_hex;
 
 // ─── TrapFrame: ABI-fixed layout, 288 bytes ────────────────────────
@@ -31,6 +33,7 @@ pub const TRAPFRAME_SIZE: usize = 288;
 
 // ─── Exception vector table + save/restore macros ──────────────────
 
+#[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(r#"
 .section .text
 
@@ -311,6 +314,7 @@ _exc_serror_stub:
 
 /// Synchronous exception dispatch — called from assembly with TrapFrame pointer
 /// x0 = &mut TrapFrame, x1 = source (0=cur/SP_EL0, 1=cur/SP_ELx, 2=lower64)
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn exception_dispatch_sync(frame: &mut TrapFrame, source: u64) {
     let esr: u64;
@@ -328,6 +332,7 @@ pub extern "C" fn exception_dispatch_sync(frame: &mut TrapFrame, source: u64) {
 }
 
 /// IRQ dispatch — acknowledge GIC, dispatch by INTID, EOI
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn exception_dispatch_irq(frame: &mut TrapFrame) {
     let intid = crate::gic::acknowledge();
@@ -349,6 +354,7 @@ pub extern "C" fn exception_dispatch_irq(frame: &mut TrapFrame) {
 }
 
 /// SError dispatch — always fatal
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn exception_dispatch_serror(_frame: &mut TrapFrame) {
     uart_print("\n!!! SERROR (fatal) !!!\n");
@@ -358,6 +364,7 @@ pub extern "C" fn exception_dispatch_serror(_frame: &mut TrapFrame) {
 // ─── Individual exception handlers ─────────────────────────────────
 
 /// SVC handler — dispatch syscalls by x7
+#[cfg(target_arch = "aarch64")]
 fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
     let syscall_nr = frame.x[7];
 
@@ -384,32 +391,28 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
 /// SYS_WRITE handler: write bytes to UART on behalf of EL0 task.
 /// x0 = pointer to buffer, x1 = length in bytes.
 /// Validates that the buffer pointer is in user-accessible memory.
+#[cfg(target_arch = "aarch64")]
 fn handle_sys_write(frame: &TrapFrame) {
     let buf_ptr = frame.x[0] as usize;
     let len = frame.x[1] as usize;
 
-    // Validate: max 256 bytes per write, non-zero length
-    if len == 0 || len > 256 {
-        return;
-    }
-
-    // Validate: buffer must be in the kernel image range (shared code/rodata)
-    // or in user stack range. For now, allow any address in the identity-mapped
-    // RAM region (0x4000_0000 – 0x4800_0000) since all tasks share address space.
-    let buf_end = buf_ptr.wrapping_add(len);
-    if buf_ptr < 0x4000_0000 || buf_end > 0x4800_0000 || buf_end < buf_ptr {
-        uart_print("!!! SYS_WRITE: bad pointer !!!\n");
+    let (valid, checked_len) = validate_write_args(buf_ptr, len);
+    if !valid {
+        if len > 0 {
+            uart_print("!!! SYS_WRITE: bad pointer !!!\n");
+        }
         return;
     }
 
     // Safe to read — copy bytes to UART
-    for i in 0..len {
+    for i in 0..checked_len {
         let byte = unsafe { core::ptr::read_volatile((buf_ptr + i) as *const u8) };
         crate::uart_write(byte);
     }
 }
 
 /// Instruction Abort handler — fault task if from lower EL, halt if from same EL
+#[cfg(target_arch = "aarch64")]
 fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
@@ -451,6 +454,7 @@ fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
 }
 
 /// Data Abort handler — fault task if from lower EL, halt if from same EL
+#[cfg(target_arch = "aarch64")]
 fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
@@ -504,6 +508,7 @@ fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
 }
 
 /// FP/SIMD trap — fault task if from lower EL, halt if from same EL
+#[cfg(target_arch = "aarch64")]
 fn handle_fp_trap(frame: &mut TrapFrame, esr: u64, source: u64) {
     uart_print("\n!!! FP/SIMD TRAP !!!");
     if source == 2 {
@@ -526,6 +531,7 @@ fn handle_fp_trap(frame: &mut TrapFrame, esr: u64, source: u64) {
 }
 
 /// Unknown/unhandled exception class — fault task if from lower EL, halt if same EL
+#[cfg(target_arch = "aarch64")]
 fn handle_unknown(frame: &mut TrapFrame, esr: u64, ec: u64, source: u64) {
     uart_print("\n!!! UNHANDLED EXCEPTION !!!");
     if source == 2 {
@@ -556,6 +562,7 @@ fn handle_unknown(frame: &mut TrapFrame, esr: u64, ec: u64, source: u64) {
 }
 
 /// Decode fault status code (DFSC/IFSC) bits [5:0] into human-readable class
+#[cfg(target_arch = "aarch64")]
 fn print_fault_class(fsc: u64) {
     let level = fsc & 0x3;
     match (fsc >> 2) & 0xF {
@@ -581,6 +588,7 @@ fn print_fault_class(fsc: u64) {
 // ─── Init ──────────────────────────────────────────────────────────
 
 /// Install exception vector table — write VBAR_EL1
+#[cfg(target_arch = "aarch64")]
 pub fn init() {
     extern "C" {
         static __exception_vectors: u8;
@@ -594,4 +602,19 @@ pub fn init() {
             options(nomem, nostack)
         );
     }
+}
+
+// ─── Pure validation logic (testable on host) ──────────────────────
+
+/// Validate a SYS_WRITE pointer+length from EL0.
+/// Returns (valid, clamped_len). Pure function — no side effects.
+pub fn validate_write_args(buf_ptr: usize, len: usize) -> (bool, usize) {
+    if len == 0 || len > 256 {
+        return (false, 0);
+    }
+    let buf_end = buf_ptr.wrapping_add(len);
+    if buf_ptr < 0x4000_0000 || buf_end > 0x4800_0000 || buf_end < buf_ptr {
+        return (false, 0);
+    }
+    (true, len)
 }

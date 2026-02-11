@@ -1,0 +1,91 @@
+# AegisOS CI — Host Unit Tests + QEMU Boot Integration
+#
+# Triggers: push/PR to main/develop
+# Jobs:
+#   1. host-tests: Run pure-logic unit tests on x86_64 Linux
+#   2. qemu-boot:  Build AArch64 kernel + verify boot on QEMU
+
+name: AegisOS CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─── Host Unit Tests ─────────────────────────────────────────────
+  host-tests:
+    name: Host Unit Tests (x86_64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: host-tests-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: host-tests-${{ runner.os }}-
+
+      - name: Run host unit tests
+        run: |
+          cargo test \
+            --target x86_64-unknown-linux-gnu \
+            --lib --test host_tests \
+            -- --test-threads=1
+
+  # ─── AArch64 Build + QEMU Boot ──────────────────────────────────
+  qemu-boot:
+    name: QEMU Boot Test (AArch64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+          targets: aarch64-unknown-none
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-arm
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: qemu-boot-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: qemu-boot-${{ runner.os }}-
+
+      - name: Build AArch64 kernel
+        run: |
+          cargo build --release \
+            -Zjson-target-spec \
+            -Zbuild-std=core \
+            -Zbuild-std-features=compiler-builtins-mem
+
+      - name: QEMU boot integration test
+        run: |
+          chmod +x tests/qemu_boot_test.sh
+          bash tests/qemu_boot_test.sh

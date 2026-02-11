@@ -1,44 +1,36 @@
-#![no_std]
-#![no_main]
+// AegisOS — Kernel binary entry point
+// This entire file is AArch64-only. When building for host tests (x86_64),
+// the content is gated off and only the lib crate is tested.
 
+// On AArch64: full kernel binary with boot asm, syscall wrappers, tasks
+#![cfg_attr(target_arch = "aarch64", no_std)]
+#![cfg_attr(target_arch = "aarch64", no_main)]
+
+// On host (x86_64): empty bin that does nothing (tests use --lib --test)
+#![cfg_attr(not(target_arch = "aarch64"), allow(unused))]
+
+#[cfg(target_arch = "aarch64")]
 use core::panic::PanicInfo;
-use core::ptr;
 
-mod mmu;
-mod exception;
-mod gic;
-mod timer;
-mod sched;
-mod ipc;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::uart_print;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::exception;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::sched;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::timer;
+#[cfg(target_arch = "aarch64")]
+use aegis_os::gic;
 
 // Boot assembly — inline vào binary thông qua global_asm!
+#[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(include_str!("boot.s"));
-
-/// UART0 PL011 data register trên QEMU virt machine
-const UART0: *mut u8 = 0x0900_0000 as *mut u8;
-
-pub fn uart_write(byte: u8) {
-    unsafe { ptr::write_volatile(UART0, byte) }
-}
-
-pub fn uart_print(s: &str) {
-    for b in s.bytes() {
-        uart_write(b);
-    }
-}
-
-/// Print a u64 value as hexadecimal
-pub fn uart_print_hex(val: u64) {
-    let hex = b"0123456789ABCDEF";
-    for i in (0..16).rev() {
-        let nibble = ((val >> (i * 4)) & 0xF) as usize;
-        uart_write(hex[nibble]);
-    }
-}
 
 // ─── Syscall wrappers ──────────────────────────────────────────────
 
 /// SYS_YIELD (syscall #0): voluntarily yield the CPU to the next task.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_yield() {
     unsafe {
@@ -52,7 +44,7 @@ pub fn syscall_yield() {
 }
 
 /// SYS_SEND (syscall #1): send message on endpoint.
-/// msg[0..4] in x0..x3, ep_id in x6, syscall# in x7.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_send(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) {
     unsafe {
@@ -70,7 +62,7 @@ pub fn syscall_send(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) {
 }
 
 /// SYS_RECV (syscall #2): receive message from endpoint.
-/// Returns msg[0] (first message word).
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_recv(ep_id: u64) -> u64 {
     let msg0: u64;
@@ -87,7 +79,7 @@ pub fn syscall_recv(ep_id: u64) -> u64 {
 }
 
 /// SYS_CALL (syscall #3): send message then wait for reply.
-/// Returns msg[0] from reply.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
     let reply0: u64;
@@ -108,8 +100,7 @@ pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
 }
 
 /// SYS_WRITE (syscall #4): write string to UART via kernel.
-/// buf = pointer to string data, len = byte count.
-/// Used by EL0 tasks that cannot access UART directly.
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_write(buf: *const u8, len: usize) {
     unsafe {
@@ -124,6 +115,7 @@ pub fn syscall_write(buf: *const u8, len: usize) {
 }
 
 /// Print a string from EL0 via SYS_WRITE syscall
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn user_print(s: &str) {
     syscall_write(s.as_ptr(), s.len());
@@ -132,28 +124,28 @@ pub fn user_print(s: &str) {
 // ─── Task entry points ─────────────────────────────────────────────
 
 /// Task A (client): send "PING" on EP 0, receive reply
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn task_a_entry() -> ! {
     loop {
-        // Send PING (msg[0] = 0x50494E47 = "PING" in ASCII hex)
         user_print("A:PING ");
         syscall_call(0, 0x50494E47, 0, 0, 0);
     }
 }
 
 /// Task B (server): receive on EP 0, send PONG reply
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn task_b_entry() -> ! {
     loop {
-        // Receive message
         let _msg = syscall_recv(0);
         user_print("B:PONG ");
-        // Reply by sending back on same endpoint
         syscall_send(0, 0x504F4E47, 0, 0, 0); // "PONG"
     }
 }
 
 /// Idle task: just wfi in a loop
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn idle_entry() -> ! {
     loop {
@@ -163,41 +155,39 @@ pub extern "C" fn idle_entry() -> ! {
 
 // ─── Kernel main ───────────────────────────────────────────────────
 
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
     uart_print("\n[AegisOS] boot\n");
     uart_print("[AegisOS] MMU enabled (identity map)\n");
     uart_print("[AegisOS] W^X enforced (WXN + 4KB pages)\n");
 
-    // Install exception vector table
     exception::init();
     uart_print("[AegisOS] exceptions ready\n");
 
-    // Initialize GIC + enable timer interrupt
     gic::init();
     gic::set_priority(timer::TIMER_INTID, 0);
     gic::enable_intid(timer::TIMER_INTID);
 
-    // Initialize scheduler with task entry points
     sched::init(
         task_a_entry as *const () as u64,
         task_b_entry as *const () as u64,
         idle_entry as *const () as u64,
     );
 
-    // Start timer: 10ms periodic tick (IRQ still masked — won't fire yet)
     timer::init(10);
 
     uart_print("[AegisOS] bootstrapping into task_a (EL0)...\n");
-
-    // Bootstrap: load task_a context and eret into it — never returns.
-    // The eret restores SPSR = 0x000 (EL0t), dropping to user mode.
-    // SAVE_CONTEXT_LOWER reloads SP to __stack_end on every exception entry.
     sched::bootstrap();
 }
 
+#[cfg(target_arch = "aarch64")]
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     uart_print("PANIC\n");
     loop {}
 }
+
+// On host target: provide a main() so the bin target compiles
+#[cfg(not(target_arch = "aarch64"))]
+fn main() {}

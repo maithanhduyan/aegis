@@ -4,89 +4,91 @@
 /// Sub-phase 1: Identity map with 2 MiB blocks
 /// Sub-phase 2: Refine to 4KB pages for kernel region, W^X enforcement
 
+#[cfg(target_arch = "aarch64")]
 use core::ptr;
 
 // ─── Descriptor bits ───────────────────────────────────────────────
 
 /// L1/L2 table descriptor — points to next-level table
-const TABLE: u64 = 0b11;
+pub const TABLE: u64 = 0b11;
 
 /// L1/L2 block descriptor — maps a large region directly
-const BLOCK: u64 = 0b01;
+pub const BLOCK: u64 = 0b01;
 
 /// L3 page descriptor
-const PAGE: u64 = 0b11;
+pub const PAGE: u64 = 0b11;
 
 // AttrIndx — index into MAIR_EL1 (bits [4:2])
 /// MAIR index 0 = Device-nGnRnE (UART, GIC)
-const ATTR_DEVICE: u64 = 0 << 2;
+pub const ATTR_DEVICE: u64 = 0 << 2;
 /// MAIR index 1 = Normal Non-Cacheable
 #[allow(dead_code)]
-const ATTR_NORMAL_NC: u64 = 1 << 2;
+pub const ATTR_NORMAL_NC: u64 = 1 << 2;
 /// MAIR index 2 = Normal Write-Back (kernel code/data/stack)
-const ATTR_NORMAL_WB: u64 = 2 << 2;
+pub const ATTR_NORMAL_WB: u64 = 2 << 2;
 
 // Access Permission (bits [7:6])
 /// EL1 Read-Write, EL0 No Access
-const AP_RW_EL1: u64 = 0b00 << 6;
+pub const AP_RW_EL1: u64 = 0b00 << 6;
 /// EL1 Read-Only, EL0 No Access
 #[allow(dead_code)]
-const AP_RO_EL1: u64 = 0b10 << 6;
+pub const AP_RO_EL1: u64 = 0b10 << 6;
 /// EL1 Read-Write, EL0 Read-Write
-const AP_RW_EL0: u64 = 0b01 << 6;
+pub const AP_RW_EL0: u64 = 0b01 << 6;
 /// EL1 Read-Only, EL0 Read-Only
 #[allow(dead_code)]
-const AP_RO_EL0: u64 = 0b11 << 6;
+pub const AP_RO_EL0: u64 = 0b11 << 6;
 
 // Shareability (bits [9:8])
 #[allow(dead_code)]
-const SH_NON: u64 = 0b00 << 8;
-const SH_INNER: u64 = 0b11 << 8;
+pub const SH_NON: u64 = 0b00 << 8;
+pub const SH_INNER: u64 = 0b11 << 8;
 
 /// Access Flag — MUST be 1 (Cortex-A53 has no HW AF management)
-const AF: u64 = 1 << 10;
+pub const AF: u64 = 1 << 10;
 
 /// Privileged Execute Never
-const PXN: u64 = 1 << 53;
+pub const PXN: u64 = 1 << 53;
 /// Unprivileged Execute Never
-const UXN: u64 = 1 << 54;
+pub const UXN: u64 = 1 << 54;
 /// Combined: no execution at any privilege level
-const XN: u64 = PXN | UXN;
+pub const XN: u64 = PXN | UXN;
 
 // ─── Composed descriptor templates ────────────────────────────────
 
 /// Device MMIO: Device-nGnRnE, RW, non-executable, AF=1
-const DEVICE_BLOCK: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | XN;
+pub const DEVICE_BLOCK: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | XN;
 
 /// Normal RAM: Write-Back, RW, Inner Shareable, AF=1 (executable for sub-phase 1)
-const RAM_BLOCK: u64 = BLOCK | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF;
+pub const RAM_BLOCK: u64 = BLOCK | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF;
 
 /// Kernel code page: Normal WB, RO, executable, Inner Shareable, AF=1
 #[allow(dead_code)]
-const KERNEL_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL1 | SH_INNER | AF;
+pub const KERNEL_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL1 | SH_INNER | AF;
 
 /// Kernel rodata page: Normal WB, RO (EL0+EL1), non-executable, Inner Shareable, AF=1
 /// Must be EL0-accessible because EL0 tasks reference string literals in .rodata
-const KERNEL_RODATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | XN;
+pub const KERNEL_RODATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | XN;
 
 /// Kernel data/bss/stack page: Normal WB, RW, non-executable, Inner Shareable, AF=1
-const KERNEL_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF | XN;
+pub const KERNEL_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF | XN;
 
 /// User data/stack page: Normal WB, RW (EL0+EL1), non-executable, Inner Shareable, AF=1
-const USER_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL0 | SH_INNER | AF | XN;
+pub const USER_DATA_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RW_EL0 | SH_INNER | AF | XN;
 
 /// User code page: Normal WB, RO (EL0+EL1), EL0-executable (UXN=0), PXN=1, Inner Shareable, AF=1
 /// PXN prevents kernel from executing user code; UXN=0 allows EL0 execution
 #[allow(dead_code)]
-const USER_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | PXN;
+pub const USER_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF | PXN;
 
 /// Shared code page: Normal WB, RO (EL0+EL1), executable by both EL1 and EL0
 /// Used for .text section where kernel and task code coexist
-const SHARED_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF;
+pub const SHARED_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF;
 
 // ─── MAIR / TCR constants ─────────────────────────────────────────
 
 /// MAIR_EL1: idx0=Device-nGnRnE(0x00), idx1=Normal-NC(0x44), idx2=Normal-WB(0xFF), idx3=Device-nGnRE(0x04)
+#[cfg(target_arch = "aarch64")]
 const MAIR_VALUE: u64 = 0x00000000_04FF4400;
 
 /// TCR_EL1 for 39-bit VA, 4KB granule, TTBR0 only
@@ -98,6 +100,7 @@ const MAIR_VALUE: u64 = 0x00000000_04FF4400;
 ///   T1SZ=25 (bits[21:16])      → (unused, EPD1=1)
 ///   EPD1=1 (bit[23])           → Disable TTBR1 walks
 ///   IPS=0b101 (bits[34:32])    → 48-bit PA
+#[cfg(target_arch = "aarch64")]
 const TCR_VALUE: u64 =
       25                      // T0SZ
     | (0b01 << 8)             // IRGN0
@@ -113,6 +116,7 @@ const TCR_VALUE: u64 =
     | (0b101_u64 << 32);      // IPS = 48-bit
 
 /// SCTLR_EL1 bits to SET for MMU enable
+#[cfg(target_arch = "aarch64")]
 const SCTLR_MMU_ON: u64 =
       (1 << 0)   // M   — MMU enable
     | (1 << 2)   // C   — Data cache enable
@@ -120,11 +124,13 @@ const SCTLR_MMU_ON: u64 =
     | (1 << 12); // I   — Instruction cache enable
 
 /// SCTLR_EL1.WXN (bit 19) — Write XOR Execute, for sub-phase 2
+#[cfg(target_arch = "aarch64")]
 const SCTLR_WXN: u64 = 1 << 19;
 
-// ─── Page table storage ────────────────────────────────────────────
+// ─── Page table storage (AArch64 only) ─────────────────────────────
 
 // Linker-provided symbols for page table memory (in .page_tables section)
+#[cfg(target_arch = "aarch64")]
 extern "C" {
     static __page_tables_start: u8;
     static __text_start: u8;
@@ -145,12 +151,14 @@ extern "C" {
 }
 
 /// Get address of a linker symbol as usize
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn sym_addr(sym: &u8) -> usize {
     sym as *const u8 as usize
 }
 
 /// Pointer to one of the 4 page tables (each 512 × u64 = 4096 bytes)
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn table_ptr(index: usize) -> *mut u64 {
     unsafe {
@@ -160,6 +168,7 @@ fn table_ptr(index: usize) -> *mut u64 {
 }
 
 /// Write a page table entry
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn write_entry(table: *mut u64, index: usize, value: u64) {
     ptr::write_volatile(table.add(index), value);
@@ -170,6 +179,7 @@ unsafe fn write_entry(table: *mut u64, index: usize, value: u64) {
 /// Initialize page tables: identity map devices + RAM with 2 MiB blocks
 ///
 /// Layout:
+#[cfg(target_arch = "aarch64")]
 ///   L1[0] → L2_device (covers 0x0000_0000 – 0x3FFF_FFFF)
 ///   L1[1] → L2_ram    (covers 0x4000_0000 – 0x7FFF_FFFF)
 ///
@@ -207,6 +217,7 @@ unsafe fn init_tables_2mib() {
 // ─── Sub-phase 2: Refine kernel 2MiB to 4KB pages with W^X ────────
 
 /// Replace L2_ram[0] (first 2MiB at 0x4000_0000) with L3 table for fine-grained permissions
+#[cfg(target_arch = "aarch64")]
 unsafe fn refine_kernel_pages() {
     let l2_ram = table_ptr(2);
     let l3_kernel = table_ptr(3);
@@ -256,6 +267,7 @@ unsafe fn refine_kernel_pages() {
 }
 
 /// Mark the stack guard page as invalid (causes Data Abort on stack overflow)
+#[cfg(target_arch = "aarch64")]
 unsafe fn set_guard_page() {
     let l3_kernel = table_ptr(3);
     let guard_addr = sym_addr(&__stack_guard);
@@ -271,6 +283,7 @@ unsafe fn set_guard_page() {
 // ─── MMU enable sequence (called from assembly) ───────────────────
 
 /// Full MMU initialization — called from boot.s after BSS clear
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_init() {
     // Sub-phase 1: Build 2MiB identity map
@@ -293,6 +306,7 @@ pub unsafe extern "C" fn mmu_init() {
 /// Enable MMU — called from assembly after mmu_init()
 /// This is kept in Rust for the register constant values, but the actual
 /// MSR sequence is in boot.s for precise control over instruction ordering.
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_get_config(out: *mut [u64; 4]) {
     let l1 = table_ptr(0);

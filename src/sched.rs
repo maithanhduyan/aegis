@@ -14,7 +14,7 @@ use crate::uart_print;
 
 // ─── Task state ────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(u8)]
 pub enum TaskState {
     Inactive = 0,
@@ -41,15 +41,15 @@ pub struct Tcb {
 // ─── Static task table ─────────────────────────────────────────────
 
 /// 3 tasks: 0 = task_a, 1 = task_b, 2 = idle
-const NUM_TASKS: usize = 3;
+pub const NUM_TASKS: usize = 3;
 
-static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
-static mut CURRENT: usize = 0;
+pub static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
+pub static mut CURRENT: usize = 0;
 
 /// Delay before auto-restarting a faulted task (100 ticks × 10ms = 1 second)
-const RESTART_DELAY_TICKS: u64 = 100;
+pub const RESTART_DELAY_TICKS: u64 = 100;
 
-const EMPTY_TCB: Tcb = Tcb {
+pub const EMPTY_TCB: Tcb = Tcb {
     context: TrapFrame {
         x: [0; 31],
         sp_el0: 0,
@@ -69,6 +69,7 @@ const EMPTY_TCB: Tcb = Tcb {
 
 /// Initialize scheduler: set up TCBs for task_a, task_b, idle.
 /// Must be called before enabling timer interrupts.
+#[cfg(target_arch = "aarch64")]
 pub fn init(
     task_a_entry: u64,
     task_b_entry: u64,
@@ -257,7 +258,7 @@ pub fn fault_current_task(frame: &mut TrapFrame) {
 
 /// Restart a faulted task: zero context, reload entry point + stack, mark Ready.
 /// Called from schedule() when restart delay has elapsed.
-fn restart_task(task_idx: usize) {
+pub fn restart_task(task_idx: usize) {
     unsafe {
         if TCBS[task_idx].state != TaskState::Faulted {
             return;
@@ -266,9 +267,13 @@ fn restart_task(task_idx: usize) {
         let id = TCBS[task_idx].id;
 
         // Zero user stack (4KB) to prevent state leakage
-        let ustack_top = TCBS[task_idx].user_stack_top;
-        let ustack_base = (ustack_top - 4096) as *mut u8;
-        core::ptr::write_bytes(ustack_base, 0, 4096);
+        // Only on AArch64 — on host tests, user_stack_top is a fake address
+        #[cfg(target_arch = "aarch64")]
+        {
+            let ustack_top = TCBS[task_idx].user_stack_top;
+            let ustack_base = (ustack_top - 4096) as *mut u8;
+            core::ptr::write_bytes(ustack_base, 0, 4096);
+        }
 
         // Zero entire TrapFrame
         core::ptr::write_bytes(
@@ -280,7 +285,7 @@ fn restart_task(task_idx: usize) {
         // Reload entry point, stack, SPSR
         TCBS[task_idx].context.elr_el1 = TCBS[task_idx].entry_point;
         TCBS[task_idx].context.spsr_el1 = 0x000; // EL0t
-        TCBS[task_idx].context.sp_el0 = ustack_top;
+        TCBS[task_idx].context.sp_el0 = TCBS[task_idx].user_stack_top;
 
         TCBS[task_idx].state = TaskState::Ready;
 
@@ -297,6 +302,7 @@ fn restart_task(task_idx: usize) {
 /// SP_EL1 stays at __stack_end (the shared kernel boot stack).
 /// SAVE_CONTEXT_LOWER reloads SP to __stack_end on every exception
 /// entry, so the bootstrap SP value doesn't matter after this point.
+#[cfg(target_arch = "aarch64")]
 pub fn bootstrap() -> ! {
     unsafe {
         TCBS[0].state = TaskState::Running;
