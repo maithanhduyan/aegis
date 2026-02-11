@@ -78,6 +78,25 @@ pub fn syscall_recv(ep_id: u64) -> u64 {
     msg0
 }
 
+/// SYS_RECV variant returning first two message registers (x0, x1).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_recv2(ep_id: u64) -> (u64, u64) {
+    let msg0: u64;
+    let msg1: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x6") ep_id,
+            in("x7") 2u64, // SYS_RECV
+            lateout("x0") msg0,
+            lateout("x1") msg1,
+            options(nomem, nostack)
+        );
+    }
+    (msg0, msg1)
+}
+
 /// SYS_CALL (syscall #3): send message then wait for reply.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
@@ -152,27 +171,170 @@ pub fn syscall_wait_notify() -> u64 {
     }
     bits
 }
+/// SYS_GRANT_CREATE (syscall #7): create shared memory grant.
+/// x0 = grant_id, x6 = peer_task_id.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_grant_create(grant_id: u64, peer_task_id: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") grant_id,
+            in("x6") peer_task_id,
+            in("x7") 7u64, // SYS_GRANT_CREATE
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
 
-// ─── Task entry points ─────────────────────────────────────────────
+/// SYS_GRANT_REVOKE (syscall #8): revoke shared memory grant.
+/// x0 = grant_id.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_grant_revoke(grant_id: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") grant_id,
+            in("x7") 8u64, // SYS_GRANT_REVOKE
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+/// SYS_IRQ_BIND (syscall #9): bind an IRQ INTID to a notification bit.
+/// x0 = intid (must be ≥ 32, SPIs only), x1 = notify_bit.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_irq_bind(intid: u64, notify_bit: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") intid,
+            in("x1") notify_bit,
+            in("x7") 9u64, // SYS_IRQ_BIND
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
 
-/// Task A (client): send "PING" on EP 0, receive reply
+/// SYS_IRQ_ACK (syscall #10): acknowledge an IRQ handled, re-enable INTID.
+/// x0 = intid.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_irq_ack(intid: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") intid,
+            in("x7") 10u64, // SYS_IRQ_ACK
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+
+/// SYS_DEVICE_MAP (syscall #11): map device MMIO into user-space.
+/// x0 = device_id (0 = UART0).
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_device_map(device_id: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") device_id,
+            in("x7") 11u64, // SYS_DEVICE_MAP
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+
+// ─── Task entry points (Phase J4: User-Mode UART Driver PoC) ───────
+
+/// UART0 PL011 Data Register address (identity-mapped after SYS_DEVICE_MAP)
+#[cfg(target_arch = "aarch64")]
+const UART0_DR: *mut u8 = 0x0900_0000 as *mut u8;
+
+/// Task 0 — UART User-Mode Driver
+///
+/// Requests UART MMIO access from kernel, then loops serving IPC requests
+/// from client tasks. Reads data from shared grant page and writes each
+/// byte directly to UART DR — a genuine EL0 device driver.
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
-pub extern "C" fn task_a_entry() -> ! {
+pub extern "C" fn uart_driver_entry() -> ! {
+    // 1. Map UART0 MMIO into our address space (EL0 accessible)
+    syscall_device_map(0); // device_id=0 = UART0
+
+    // 2. Announce we're ready (still using SYS_WRITE for initial status)
+    user_print("DRV:ready ");
+
+    // 3. Serve client requests forever
     loop {
-        user_print("A:PING ");
-        syscall_call(0, 0x50494E47, 0, 0, 0);
+        // Block waiting for an IPC request on EP 0
+        let (buf_addr_raw, len_raw) = syscall_recv2(0);
+
+        // msg x0 = buffer address in grant page
+        // msg x1 = byte count to write
+        let buf_addr = buf_addr_raw as *const u8;
+        let len = len_raw as usize;
+
+        // Write each byte directly to UART DR (EL0 MMIO write!)
+        for i in 0..len {
+            unsafe {
+                let byte = core::ptr::read_volatile(buf_addr.add(i));
+                core::ptr::write_volatile(UART0_DR, byte);
+            }
+        }
+
+        // Reply "OK" to unblock the client
+        syscall_send(0, 0x4F4B, 0, 0, 0); // "OK"
     }
 }
 
-/// Task B (server): receive on EP 0, send PONG reply
+/// Task 1 — Client using UART driver via IPC + shared memory
+///
+/// Creates a shared memory grant, writes a message into the grant page,
+/// then calls the UART driver via IPC to output it. This demonstrates
+/// the full user-mode driver stack: grant + IPC + MMIO.
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
-pub extern "C" fn task_b_entry() -> ! {
+pub extern "C" fn client_entry() -> ! {
+    // 1. Create a shared memory grant: grant 0, owner=us(task 1), peer=driver(task 0)
+    syscall_grant_create(0, 0); // grant_id=0, peer_task_id=0
+
+    // 2. Get the grant page address (identity-mapped, known at compile time)
+    let grant_addr = aegis_os::grant::grant_page_addr(0).unwrap_or(0) as *mut u8;
+
     loop {
-        let _msg = syscall_recv(0);
-        user_print("B:PONG ");
-        syscall_send(0, 0x504F4E47, 0, 0, 0); // "PONG"
+        // 3. Write the message into the grant page
+        let msg = b"J4:UserDrv ";
+        unsafe {
+            for (i, &byte) in msg.iter().enumerate() {
+                core::ptr::write_volatile(grant_addr.add(i), byte);
+            }
+        }
+
+        // 4. Call the UART driver: send buffer address + length via IPC
+        syscall_call(0, grant_addr as u64, msg.len() as u64, 0, 0);
     }
 }
 
@@ -202,25 +364,29 @@ pub extern "C" fn kernel_main() -> ! {
     gic::enable_intid(timer::TIMER_INTID);
 
     sched::init(
-        task_a_entry as *const () as u64,
-        task_b_entry as *const () as u64,
+        uart_driver_entry as *const () as u64,
+        client_entry as *const () as u64,
         idle_entry as *const () as u64,
     );
 
     // ─── Phase G: Assign capabilities ──────────────────────────────
     unsafe {
         use aegis_os::cap::*;
-        // Task 0 (task_a): PING client — needs CALL on EP0 + WRITE + YIELD + notifications
+        // Task 0 (UART driver): needs RECV/SEND on EP0 + WRITE + YIELD + notifications + grants + IRQ + device map
         sched::TCBS[0].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
-            | CAP_NOTIFY | CAP_WAIT_NOTIFY;
-        // Task 1 (task_b): PONG server — needs RECV/SEND on EP0 + WRITE + YIELD + notifications
+            | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE
+            | CAP_IRQ_BIND | CAP_IRQ_ACK | CAP_DEVICE_MAP;
+        // Task 1 (client): needs CALL on EP0 + WRITE + YIELD + notifications + grants
         sched::TCBS[1].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
-            | CAP_NOTIFY | CAP_WAIT_NOTIFY;
+            | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE;
         // Task 2 (idle): only needs YIELD (WFI loop)
         sched::TCBS[2].caps = CAP_YIELD;
     }
     uart_print("[AegisOS] capabilities assigned\n");
     uart_print("[AegisOS] notification system ready\n");
+    uart_print("[AegisOS] grant system ready\n");
+    uart_print("[AegisOS] IRQ routing ready\n");
+    uart_print("[AegisOS] device MMIO mapping ready\n");
 
     // ─── Phase H: Assign per-task address spaces ───────────────────
     unsafe {
@@ -234,7 +400,7 @@ pub extern "C" fn kernel_main() -> ! {
 
     timer::init(10);
 
-    uart_print("[AegisOS] bootstrapping into task_a (EL0)...\n");
+    uart_print("[AegisOS] bootstrapping into uart_driver (EL0)...\n");
     sched::bootstrap();
 }
 

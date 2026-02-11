@@ -27,8 +27,13 @@ use aegis_os::cap::{
     CAP_NOTIFY, CAP_WAIT_NOTIFY,
     CAP_IPC_SEND_EP2, CAP_IPC_RECV_EP2,
     CAP_IPC_SEND_EP3, CAP_IPC_RECV_EP3,
+    CAP_GRANT_CREATE, CAP_GRANT_REVOKE,
+    CAP_IRQ_BIND, CAP_IRQ_ACK,
+    CAP_DEVICE_MAP,
     CAP_ALL, CAP_NONE,
 };
+use aegis_os::grant::{self, EMPTY_GRANT, MAX_GRANTS};
+use aegis_os::irq::{self, EMPTY_BINDING, MAX_IRQ_BINDINGS};
 
 // ─── Helper: read CURRENT safely (avoids static_mut_refs warning) ──
 
@@ -63,6 +68,16 @@ unsafe fn reset_test_state() {
 
     // Reset tick counter
     aegis_os::timer::TICK_COUNT = 0;
+
+    // Reset grant table
+    for i in 0..MAX_GRANTS {
+        grant::GRANTS[i] = EMPTY_GRANT;
+    }
+
+    // Reset IRQ bindings
+    for i in 0..MAX_IRQ_BINDINGS {
+        irq::IRQ_BINDINGS[i] = EMPTY_BINDING;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -854,7 +869,7 @@ fn cap_name_returns_expected_strings() {
     assert_eq!(cap::cap_name(CAP_IPC_RECV_EP3), "IPC_RECV_EP3");
     assert_eq!(cap::cap_name(CAP_ALL), "ALL");
     assert_eq!(cap::cap_name(CAP_NONE), "NONE");
-    assert_eq!(cap::cap_name(0xFFFF), "UNKNOWN");
+    assert_eq!(cap::cap_name(0xDEAD_BEEF), "UNKNOWN");
 }
 
 // ─── G3: Caps survive in EMPTY_TCB / TCB ──────────────────────────
@@ -1234,4 +1249,454 @@ fn ipc_cleanup_all_four_endpoints() {
                 "EP{} receiver should not be task 1 after cleanup", i);
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 11. Shared Memory Grant Tests (Phase J1)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn grant_create_success() {
+    unsafe {
+        reset_test_state();
+        let result = grant::grant_create(0, 0, 1);
+        assert_eq!(result, 0, "grant_create should return 0 on success");
+        assert!(grant::GRANTS[0].active, "grant 0 should be active");
+        assert_eq!(grant::GRANTS[0].owner, Some(0));
+        assert_eq!(grant::GRANTS[0].peer, Some(1));
+        assert_ne!(grant::GRANTS[0].phys_addr, 0, "phys_addr should be non-zero");
+    }
+}
+
+#[test]
+fn grant_create_duplicate_rejected() {
+    unsafe {
+        reset_test_state();
+        let r1 = grant::grant_create(0, 0, 1);
+        assert_eq!(r1, 0);
+        let r2 = grant::grant_create(0, 0, 2);
+        assert_eq!(r2, 0xFFFF_0002, "duplicate grant should be rejected");
+    }
+}
+
+#[test]
+fn grant_create_invalid_id() {
+    unsafe {
+        reset_test_state();
+        let r = grant::grant_create(MAX_GRANTS, 0, 1);
+        assert_eq!(r, 0xFFFF_0001, "out-of-range grant_id should fail");
+    }
+}
+
+#[test]
+fn grant_create_invalid_peer() {
+    unsafe {
+        reset_test_state();
+        let r = grant::grant_create(0, 0, sched::NUM_TASKS);
+        assert_eq!(r, 0xFFFF_0003, "peer >= NUM_TASKS should fail");
+    }
+}
+
+#[test]
+fn grant_create_self_grant_rejected() {
+    unsafe {
+        reset_test_state();
+        let r = grant::grant_create(0, 1, 1);
+        assert_eq!(r, 0xFFFF_0004, "owner == peer should fail");
+    }
+}
+
+#[test]
+fn grant_revoke_by_owner() {
+    unsafe {
+        reset_test_state();
+        grant::grant_create(0, 0, 1);
+        let r = grant::grant_revoke(0, 0);
+        assert_eq!(r, 0, "owner should be able to revoke");
+        assert!(!grant::GRANTS[0].active, "grant should be inactive after revoke");
+        assert_eq!(grant::GRANTS[0].peer, None, "peer should be None after revoke");
+        // Owner is still recorded so it can re-create later
+    }
+}
+
+#[test]
+fn grant_revoke_by_non_owner_rejected() {
+    unsafe {
+        reset_test_state();
+        grant::grant_create(0, 0, 1);
+        let r = grant::grant_revoke(0, 1);
+        assert_eq!(r, 0xFFFF_0005, "non-owner revoke should fail");
+        assert!(grant::GRANTS[0].active, "grant should remain active");
+    }
+}
+
+#[test]
+fn grant_revoke_inactive_is_noop() {
+    unsafe {
+        reset_test_state();
+        let r = grant::grant_revoke(0, 0);
+        assert_eq!(r, 0, "revoking inactive grant should be no-op success");
+    }
+}
+
+#[test]
+fn grant_revoke_invalid_id() {
+    unsafe {
+        reset_test_state();
+        let r = grant::grant_revoke(MAX_GRANTS, 0);
+        assert_eq!(r, 0xFFFF_0001, "out-of-range grant_id should fail");
+    }
+}
+
+#[test]
+fn grant_cleanup_owner_faulted() {
+    unsafe {
+        reset_test_state();
+        grant::grant_create(0, 0, 1);
+        grant::grant_create(1, 0, 2);
+        // Task 0 faults — all its grants should be cleared
+        grant::cleanup_task(0);
+        assert!(!grant::GRANTS[0].active);
+        assert_eq!(grant::GRANTS[0].owner, None);
+        assert_eq!(grant::GRANTS[0].peer, None);
+        assert!(!grant::GRANTS[1].active);
+        assert_eq!(grant::GRANTS[1].owner, None);
+        assert_eq!(grant::GRANTS[1].peer, None);
+    }
+}
+
+#[test]
+fn grant_cleanup_peer_faulted() {
+    unsafe {
+        reset_test_state();
+        grant::grant_create(0, 0, 1);
+        // Task 1 (peer) faults — peer access removed, grant deactivated
+        grant::cleanup_task(1);
+        assert!(!grant::GRANTS[0].active, "grant should be inactive after peer fault");
+        assert_eq!(grant::GRANTS[0].peer, None, "peer should be None");
+        // Owner field preserved (EMPTY_GRANT clears it only when owner faults)
+        assert_eq!(grant::GRANTS[0].owner, Some(0), "owner should be preserved");
+    }
+}
+
+#[test]
+fn grant_page_addr_valid() {
+    // On host, returns fake addresses in 0x4010_0000 range
+    assert!(grant::grant_page_addr(0).is_some());
+    assert!(grant::grant_page_addr(1).is_some());
+    let a0 = grant::grant_page_addr(0).unwrap();
+    let a1 = grant::grant_page_addr(1).unwrap();
+    assert_ne!(a0, a1, "each grant page should have a distinct address");
+    assert_eq!(a1 - a0, 4096, "grant pages should be 4KB apart");
+}
+
+#[test]
+fn grant_page_addr_invalid() {
+    assert!(grant::grant_page_addr(MAX_GRANTS).is_none());
+    assert!(grant::grant_page_addr(MAX_GRANTS + 1).is_none());
+}
+
+#[test]
+fn cap_for_syscall_grant() {
+    assert_eq!(cap::cap_for_syscall(7, 0), CAP_GRANT_CREATE);
+    assert_eq!(cap::cap_for_syscall(8, 0), CAP_GRANT_REVOKE);
+}
+
+#[test]
+fn cap_all_includes_grants() {
+    assert_ne!(CAP_ALL & CAP_GRANT_CREATE, 0, "CAP_ALL should include GRANT_CREATE");
+    assert_ne!(CAP_ALL & CAP_GRANT_REVOKE, 0, "CAP_ALL should include GRANT_REVOKE");
+}
+
+#[test]
+fn grant_two_grants_independent() {
+    unsafe {
+        reset_test_state();
+        let r0 = grant::grant_create(0, 0, 1);
+        let r1 = grant::grant_create(1, 1, 2);
+        assert_eq!(r0, 0);
+        assert_eq!(r1, 0);
+        assert!(grant::GRANTS[0].active);
+        assert!(grant::GRANTS[1].active);
+        assert_ne!(grant::GRANTS[0].phys_addr, grant::GRANTS[1].phys_addr);
+
+        // Revoke one doesn't affect the other
+        grant::grant_revoke(0, 0);
+        assert!(!grant::GRANTS[0].active);
+        assert!(grant::GRANTS[1].active, "grant 1 should be unaffected");
+    }
+}
+
+#[test]
+fn grant_re_create_after_revoke() {
+    unsafe {
+        reset_test_state();
+        grant::grant_create(0, 0, 1);
+        grant::grant_revoke(0, 0);
+        // Should be able to re-create the same grant slot
+        let r = grant::grant_create(0, 1, 2);
+        assert_eq!(r, 0, "re-create after revoke should succeed");
+        assert_eq!(grant::GRANTS[0].owner, Some(1));
+        assert_eq!(grant::GRANTS[0].peer, Some(2));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 12. IRQ Routing Tests (Phase J2)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn irq_bind_success() {
+    unsafe {
+        reset_test_state();
+        let r = irq::irq_bind(33, 0, 0x01);
+        assert_eq!(r, 0, "irq_bind should succeed for SPI INTID 33");
+        assert!(irq::IRQ_BINDINGS[0].active);
+        assert_eq!(irq::IRQ_BINDINGS[0].intid, 33);
+        assert_eq!(irq::IRQ_BINDINGS[0].task_id, 0);
+        assert_eq!(irq::IRQ_BINDINGS[0].notify_bit, 0x01);
+        assert!(!irq::IRQ_BINDINGS[0].pending_ack);
+    }
+}
+
+#[test]
+fn irq_bind_reject_ppi() {
+    unsafe {
+        reset_test_state();
+        // INTID < 32 is PPI/SGI range, must be rejected
+        let r = irq::irq_bind(30, 0, 0x01); // timer INTID
+        assert_eq!(r, irq::ERR_INVALID_INTID);
+        let r2 = irq::irq_bind(15, 0, 0x01);
+        assert_eq!(r2, irq::ERR_INVALID_INTID);
+    }
+}
+
+#[test]
+fn irq_bind_reject_zero_bit() {
+    unsafe {
+        reset_test_state();
+        let r = irq::irq_bind(33, 0, 0);
+        assert_eq!(r, irq::ERR_INVALID_INTID, "notify_bit=0 should be rejected");
+    }
+}
+
+#[test]
+fn irq_bind_reject_duplicate() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        let r = irq::irq_bind(33, 1, 0x02);
+        assert_eq!(r, irq::ERR_ALREADY_BOUND, "duplicate INTID should be rejected");
+    }
+}
+
+#[test]
+fn irq_bind_table_full() {
+    unsafe {
+        reset_test_state();
+        // Fill all 8 slots
+        for i in 0..MAX_IRQ_BINDINGS {
+            let r = irq::irq_bind(32 + i as u32, 0, 1u64 << i);
+            assert_eq!(r, 0, "binding {} should succeed", i);
+        }
+        // 9th should fail
+        let r = irq::irq_bind(100, 0, 0x100);
+        assert_eq!(r, irq::ERR_TABLE_FULL);
+    }
+}
+
+#[test]
+fn irq_ack_success() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        // Simulate IRQ fired: set pending_ack manually
+        irq::IRQ_BINDINGS[0].pending_ack = true;
+        let r = irq::irq_ack(33, 0);
+        assert_eq!(r, 0);
+        assert!(!irq::IRQ_BINDINGS[0].pending_ack, "pending_ack should be cleared");
+    }
+}
+
+#[test]
+fn irq_ack_wrong_task() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        irq::IRQ_BINDINGS[0].pending_ack = true;
+        let r = irq::irq_ack(33, 1); // task 1 didn't bind this
+        assert_eq!(r, irq::ERR_NOT_OWNER);
+    }
+}
+
+#[test]
+fn irq_ack_not_bound() {
+    unsafe {
+        reset_test_state();
+        let r = irq::irq_ack(33, 0);
+        assert_eq!(r, irq::ERR_NOT_BOUND);
+    }
+}
+
+#[test]
+fn irq_ack_already_acked_is_noop() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        // pending_ack is false (no IRQ fired)
+        let r = irq::irq_ack(33, 0);
+        assert_eq!(r, 0, "ACK when not pending should be no-op success");
+    }
+}
+
+#[test]
+fn irq_route_sets_notify_pending() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        // Simulate IRQ routing via host-test stub
+        irq::irq_route_test(33, 0);
+        assert_eq!(sched::TCBS[0].notify_pending, 0x01,
+            "notify_pending should have the bound bit set");
+        assert!(irq::IRQ_BINDINGS[0].pending_ack, "pending_ack should be true");
+    }
+}
+
+#[test]
+fn irq_route_unblocks_waiting_task() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        // Task 0 is waiting for notifications
+        sched::TCBS[0].state = TaskState::Blocked;
+        sched::TCBS[0].notify_waiting = true;
+        sched::TCBS[0].notify_pending = 0;
+        // Fire IRQ
+        irq::irq_route_test(33, 0);
+        assert_eq!(sched::TCBS[0].state, TaskState::Ready, "task should be unblocked");
+        assert!(!sched::TCBS[0].notify_waiting, "notify_waiting should be cleared");
+        assert_eq!(sched::TCBS[0].context.x[0], 0x01, "delivered bits should be in x0");
+        assert_eq!(sched::TCBS[0].notify_pending, 0, "pending should be cleared after delivery");
+    }
+}
+
+#[test]
+fn irq_route_accumulates_bits() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        irq::irq_bind(34, 0, 0x02);
+        // Set pending_ack=false so we can route both (in practice kernel masks)
+        irq::irq_route_test(33, 0);
+        irq::IRQ_BINDINGS[0].pending_ack = false; // pretend ACK'd
+        sched::TCBS[0].notify_pending = 0x01; // kept from first route
+        irq::irq_route_test(34, 0);
+        // Both bits should be accumulated
+        assert_eq!(sched::TCBS[0].notify_pending, 0x01 | 0x02);
+    }
+}
+
+#[test]
+fn irq_cleanup_unbinds_all() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        irq::irq_bind(34, 0, 0x02);
+        irq::IRQ_BINDINGS[0].pending_ack = true;
+        irq::irq_cleanup_task(0);
+        for i in 0..MAX_IRQ_BINDINGS {
+            assert!(!irq::IRQ_BINDINGS[i].active,
+                "binding {} should be inactive after cleanup", i);
+        }
+    }
+}
+
+#[test]
+fn irq_cleanup_does_not_affect_other_tasks() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        irq::irq_bind(34, 1, 0x02);
+        irq::irq_cleanup_task(0);
+        assert!(!irq::IRQ_BINDINGS[0].active, "task 0 binding should be cleaned");
+        assert!(irq::IRQ_BINDINGS[1].active, "task 1 binding should remain");
+    }
+}
+
+#[test]
+fn cap_for_syscall_irq() {
+    assert_eq!(cap::cap_for_syscall(9, 0), CAP_IRQ_BIND);
+    assert_eq!(cap::cap_for_syscall(10, 0), CAP_IRQ_ACK);
+}
+
+#[test]
+fn cap_all_includes_irq() {
+    assert_ne!(CAP_ALL & CAP_IRQ_BIND, 0, "CAP_ALL should include IRQ_BIND");
+    assert_ne!(CAP_ALL & CAP_IRQ_ACK, 0, "CAP_ALL should include IRQ_ACK");
+}
+
+#[test]
+fn irq_rebind_after_cleanup() {
+    unsafe {
+        reset_test_state();
+        irq::irq_bind(33, 0, 0x01);
+        irq::irq_cleanup_task(0);
+        // Should be able to rebind same INTID to different task
+        let r = irq::irq_bind(33, 1, 0x04);
+        assert_eq!(r, 0, "rebind after cleanup should succeed");
+        assert_eq!(irq::IRQ_BINDINGS[0].task_id, 1);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 13. Device MMIO Mapping Tests (Phase J3)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn device_map_valid_uart() {
+    let r = mmu::map_device_for_task(0, 0); // device_id=0 = UART0, task 0
+    assert_eq!(r, 0, "mapping UART0 for task 0 should succeed");
+}
+
+#[test]
+fn device_map_invalid_device_id() {
+    let r = mmu::map_device_for_task(99, 0);
+    assert_eq!(r, mmu::DEVICE_MAP_ERR_INVALID_ID, "invalid device_id should fail");
+}
+
+#[test]
+fn device_map_invalid_task_id() {
+    let r = mmu::map_device_for_task(0, 5);
+    assert_eq!(r, mmu::DEVICE_MAP_ERR_INVALID_TASK, "invalid task_id should fail");
+}
+
+#[test]
+fn device_registry_uart_l2_index() {
+    assert_eq!(mmu::DEVICES[0].l2_index, 72, "UART0 should be at L2 index 72");
+    assert_eq!(mmu::DEVICES[0].intid, 33, "UART0 INTID should be 33");
+    assert_eq!(mmu::DEVICES[0].name, "UART0");
+}
+
+#[test]
+fn cap_for_syscall_device_map() {
+    assert_eq!(cap::cap_for_syscall(11, 0), CAP_DEVICE_MAP);
+}
+
+#[test]
+fn cap_all_includes_device_map() {
+    assert_ne!(CAP_ALL & CAP_DEVICE_MAP, 0, "CAP_ALL should include DEVICE_MAP");
+}
+
+#[test]
+fn page_table_constants_j3() {
+    // Verify the new 16-page layout constants
+    assert_eq!(mmu::NUM_PAGE_TABLE_PAGES, 16);
+    assert_eq!(mmu::PT_L2_DEVICE_0, 0);
+    assert_eq!(mmu::PT_L2_DEVICE_1, 1);
+    assert_eq!(mmu::PT_L2_DEVICE_2, 2);
+    assert_eq!(mmu::PT_L1_TASK0, 3);
+    assert_eq!(mmu::PT_L3_TASK0, 9);
+    assert_eq!(mmu::PT_L2_DEVICE_KERNEL, 12);
+    assert_eq!(mmu::PT_L1_KERNEL, 13);
+    assert_eq!(mmu::PT_L3_KERNEL, 15);
 }

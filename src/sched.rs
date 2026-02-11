@@ -272,6 +272,12 @@ pub fn fault_current_task(frame: &mut TrapFrame) {
         // Clean up IPC endpoints — unblock any partner waiting for this task
         crate::ipc::cleanup_task(current);
 
+        // Clean up shared memory grants — revoke all grants involving this task
+        crate::grant::cleanup_task(current);
+
+        // Clean up IRQ bindings — unbind all IRQs owned by this task
+        crate::irq::irq_cleanup_task(current);
+
         // Schedule away to the next ready task
         schedule(frame);
     }

@@ -343,11 +343,7 @@ pub extern "C" fn exception_dispatch_irq(frame: &mut TrapFrame) {
 
     match intid {
         crate::timer::TIMER_INTID => crate::timer::tick_handler(frame),
-        _ => {
-            uart_print("!!! IRQ INTID=");
-            uart_print_hex(intid as u64);
-            uart_print(" (unhandled) !!!\n");
-        }
+        _ => crate::irq::irq_route(intid, frame),
     }
 
     crate::gic::end_interrupt(intid);
@@ -400,6 +396,16 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
         5 => handle_notify(frame),
         // SYS_WAIT_NOTIFY = 6: wait for notification (returns pending bits in x0)
         6 => handle_wait_notify(frame),
+        // SYS_GRANT_CREATE = 7: create shared memory grant (x0=grant_id, x6=peer_task_id)
+        7 => handle_grant_create(frame),
+        // SYS_GRANT_REVOKE = 8: revoke shared memory grant (x0=grant_id)
+        8 => handle_grant_revoke(frame),
+        // SYS_IRQ_BIND = 9: bind IRQ to notification (x0=intid, x1=notify_bit)
+        9 => handle_irq_bind(frame),
+        // SYS_IRQ_ACK = 10: acknowledge IRQ handled (x0=intid)
+        10 => handle_irq_ack(frame),
+        // SYS_DEVICE_MAP = 11: map device MMIO into user-space (x0=device_id)
+        11 => handle_device_map(frame),
         _ => {
             uart_print("!!! unknown syscall #");
             uart_print_hex(syscall_nr);
@@ -490,6 +496,65 @@ fn handle_wait_notify(frame: &mut TrapFrame) {
             crate::sched::schedule(frame);
         }
     }
+}
+
+/// SYS_GRANT_CREATE handler: create shared memory grant.
+/// x0 = grant_id, x6 = peer_task_id.
+/// Returns result in x0 (0 = success, else error code).
+#[cfg(target_arch = "aarch64")]
+fn handle_grant_create(frame: &mut TrapFrame) {
+    let grant_id = frame.x[0] as usize;
+    let peer_id = frame.x[6] as usize;
+    let current = unsafe { crate::sched::CURRENT };
+
+    let result = crate::grant::grant_create(grant_id, current, peer_id);
+    frame.x[0] = result;
+}
+
+/// SYS_GRANT_REVOKE handler: revoke shared memory grant.
+/// x0 = grant_id.
+/// Returns result in x0 (0 = success, else error code).
+#[cfg(target_arch = "aarch64")]
+fn handle_grant_revoke(frame: &mut TrapFrame) {
+    let grant_id = frame.x[0] as usize;
+    let current = unsafe { crate::sched::CURRENT };
+
+    let result = crate::grant::grant_revoke(grant_id, current);
+    frame.x[0] = result;
+}
+
+/// SYS_IRQ_BIND handler: bind IRQ INTID to notification bit.
+/// x0 = intid, x1 = notify_bit.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+fn handle_irq_bind(frame: &mut TrapFrame) {
+    let intid = frame.x[0] as u32;
+    let notify_bit = frame.x[1];
+    let current = unsafe { crate::sched::CURRENT };
+    let result = crate::irq::irq_bind(intid, current, notify_bit);
+    frame.x[0] = result;
+}
+
+/// SYS_IRQ_ACK handler: acknowledge IRQ handled, unmask INTID.
+/// x0 = intid.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+fn handle_irq_ack(frame: &mut TrapFrame) {
+    let intid = frame.x[0] as u32;
+    let current = unsafe { crate::sched::CURRENT };
+    let result = crate::irq::irq_ack(intid, current);
+    frame.x[0] = result;
+}
+
+/// SYS_DEVICE_MAP handler: map device MMIO into user-space.
+/// x0 = device_id (0 = UART0).
+/// Returns result in x0 (0 = success, else error code).
+#[cfg(target_arch = "aarch64")]
+fn handle_device_map(frame: &mut TrapFrame) {
+    let device_id = frame.x[0];
+    let current = unsafe { crate::sched::CURRENT };
+    let result = unsafe { crate::mmu::map_device_for_task(device_id, current) };
+    frame.x[0] = result;
 }
 
 /// Instruction Abort handler — fault task if from lower EL, halt if from same EL

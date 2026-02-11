@@ -15,6 +15,8 @@ pub mod exception;
 pub mod sched;
 pub mod ipc;
 pub mod timer;
+pub mod grant;
+pub mod irq;
 
 #[cfg(target_arch = "aarch64")]
 pub mod gic;

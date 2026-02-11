@@ -59,6 +59,10 @@ pub const XN: u64 = PXN | UXN;
 /// Device MMIO: Device-nGnRnE, RW, non-executable, AF=1
 pub const DEVICE_BLOCK: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | XN;
 
+/// Device MMIO for EL0: Device-nGnRnE, RW for EL0+EL1, non-executable, AF=1
+/// Used by map_device_for_task() to grant user-mode access to a device.
+pub const DEVICE_BLOCK_EL0: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL0 | AF | XN;
+
 /// Normal RAM: Write-Back, RW, Inner Shareable, AF=1 (executable for sub-phase 1)
 pub const RAM_BLOCK: u64 = BLOCK | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF;
 
@@ -129,28 +133,32 @@ const SCTLR_WXN: u64 = 1 << 19;
 
 // ─── Page table storage (AArch64 only) ─────────────────────────────
 
-/// Number of page table pages (Phase H: per-task address spaces)
-/// [0]  = L2_device (shared)
-/// [1]  = L1 for task 0      [2]  = L1 for task 1      [3]  = L1 for task 2
-/// [4]  = L2_ram for task 0   [5]  = L2_ram for task 1   [6]  = L2_ram for task 2
-/// [7]  = L3 for task 0       [8]  = L3 for task 1       [9]  = L3 for task 2
-/// [10] = L1 kernel boot      [11] = L2_ram kernel boot  [12] = L3 kernel boot
-pub const NUM_PAGE_TABLE_PAGES: usize = 13;
+/// Number of page table pages (Phase J3: per-task L2_device for MMIO isolation)
+/// [0]  = L2_device task 0   [1]  = L2_device task 1   [2]  = L2_device task 2
+/// [3]  = L1 for task 0       [4]  = L1 for task 1       [5]  = L1 for task 2
+/// [6]  = L2_ram for task 0   [7]  = L2_ram for task 1   [8]  = L2_ram for task 2
+/// [9]  = L3 for task 0       [10] = L3 for task 1       [11] = L3 for task 2
+/// [12] = L2_device kernel    [13] = L1 kernel boot      [14] = L2_ram kernel boot
+/// [15] = L3 kernel boot
+pub const NUM_PAGE_TABLE_PAGES: usize = 16;
 
-// Page indices
-pub const PT_L2_DEVICE: usize = 0;
-pub const PT_L1_TASK0: usize = 1;
-pub const PT_L1_TASK1: usize = 2;
-pub const PT_L1_TASK2: usize = 3;
-pub const PT_L2_RAM_TASK0: usize = 4;
-pub const PT_L2_RAM_TASK1: usize = 5;
-pub const PT_L2_RAM_TASK2: usize = 6;
-pub const PT_L3_TASK0: usize = 7;
-pub const PT_L3_TASK1: usize = 8;
-pub const PT_L3_TASK2: usize = 9;
-pub const PT_L1_KERNEL: usize = 10;
-pub const PT_L2_RAM_KERNEL: usize = 11;
-pub const PT_L3_KERNEL: usize = 12;
+// Page indices — per-task L2_device (J3)
+pub const PT_L2_DEVICE_0: usize = 0;
+pub const PT_L2_DEVICE_1: usize = 1;
+pub const PT_L2_DEVICE_2: usize = 2;
+pub const PT_L1_TASK0: usize = 3;
+pub const PT_L1_TASK1: usize = 4;
+pub const PT_L1_TASK2: usize = 5;
+pub const PT_L2_RAM_TASK0: usize = 6;
+pub const PT_L2_RAM_TASK1: usize = 7;
+pub const PT_L2_RAM_TASK2: usize = 8;
+pub const PT_L3_TASK0: usize = 9;
+pub const PT_L3_TASK1: usize = 10;
+pub const PT_L3_TASK2: usize = 11;
+pub const PT_L2_DEVICE_KERNEL: usize = 12;
+pub const PT_L1_KERNEL: usize = 13;
+pub const PT_L2_RAM_KERNEL: usize = 14;
+pub const PT_L3_KERNEL: usize = 15;
 
 // Linker-provided symbols for page table memory (in .page_tables section)
 #[cfg(target_arch = "aarch64")]
@@ -171,6 +179,8 @@ extern "C" {
     static __user_stacks_end: u8;
     static __task_stacks_start: u8;
     static __task_stacks_end: u8;
+    static __grant_pages_start: u8;
+    static __grant_pages_end: u8;
 }
 
 /// Get address of a linker symbol as usize
@@ -199,11 +209,13 @@ unsafe fn write_entry(table: *mut u64, index: usize, value: u64) {
 
 // ─── Phase H: Per-task page tables ─────────────────────────────────
 
-/// Build the shared L2_device table (page 0).
+/// Build an L2_device table at page index `l2dev_index`.
 /// Maps device MMIO at indices 64..=72 (0x0800_0000–0x09FF_FFFF).
+/// All entries start as DEVICE_BLOCK (AP_RW_EL1, EL0 no access).
+/// map_device_for_task() later upgrades specific entries to DEVICE_BLOCK_EL0.
 #[cfg(target_arch = "aarch64")]
-unsafe fn build_l2_device() {
-    let l2_device = table_ptr(PT_L2_DEVICE);
+unsafe fn build_l2_device(l2dev_index: usize) {
+    let l2_device = table_ptr(l2dev_index);
     for i in 64..=72 {
         let pa = (i as u64) * 0x20_0000;
         write_entry(l2_device, i, pa | DEVICE_BLOCK);
@@ -225,6 +237,8 @@ unsafe fn build_l3(l3_index: usize, owner_task: u8) {
     let kernel_end = sym_addr(&__kernel_end);
     let user_stacks_start = sym_addr(&__user_stacks_start);
     let user_stacks_end = sym_addr(&__user_stacks_end);
+    let grant_pages_start = sym_addr(&__grant_pages_start);
+    let grant_pages_end = sym_addr(&__grant_pages_end);
     let guard_addr = sym_addr(&__stack_guard);
 
     let base: usize = 0x4000_0000;
@@ -247,6 +261,9 @@ unsafe fn build_l3(l3_index: usize, owner_task: u8) {
                 // Other task's stack: EL1-only (EL0 → Permission Fault)
                 (pa as u64) | KERNEL_DATA_PAGE
             }
+        } else if pa >= grant_pages_start && pa < grant_pages_end {
+            // Grant pages — default EL1-only; map_grant_for_task() upgrades to EL0
+            (pa as u64) | KERNEL_DATA_PAGE
         } else if pa >= text_start && pa < text_end {
             (pa as u64) | SHARED_CODE_PAGE
         } else if pa >= rodata_start && pa < rodata_end {
@@ -282,10 +299,11 @@ unsafe fn build_l2_ram(l2_index: usize, l3_index: usize) {
 
 /// Build an L1 table for a specific task (or kernel boot).
 /// `l1_index` = page index for this L1, `l2_ram_index` = page index for its L2_ram.
+/// `l2_device_index` = page index for this task's L2_device table.
 #[cfg(target_arch = "aarch64")]
-unsafe fn build_l1(l1_index: usize, l2_ram_index: usize) {
+unsafe fn build_l1(l1_index: usize, l2_ram_index: usize, l2_device_index: usize) {
     let l1 = table_ptr(l1_index);
-    let l2_device = table_ptr(PT_L2_DEVICE);
+    let l2_device = table_ptr(l2_device_index);
     let l2_ram = table_ptr(l2_ram_index);
 
     write_entry(l1, 0, (l2_device as u64) | TABLE);
@@ -317,25 +335,29 @@ pub fn ttbr0_for_task(task_id: usize, asid: u16) -> u64 {
 // ─── MMU enable sequence (called from assembly) ───────────────────
 
 /// Full MMU initialization — called from boot.s after BSS clear.
-/// Phase H: builds 13 page tables (3 per task + 1 shared L2_device + 3 kernel boot).
+/// Phase J3: builds 16 page tables (4 L2_device + 3 per task + 4 kernel boot).
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_init() {
-    // Shared L2_device (page 0)
-    build_l2_device();
+    // Per-task L2_device tables (pages 0, 1, 2) — all devices EL1-only initially
+    for task in 0..3_usize {
+        build_l2_device(PT_L2_DEVICE_0 + task);
+    }
+    // Kernel boot L2_device (page 12) — all devices EL1-accessible
+    build_l2_device(PT_L2_DEVICE_KERNEL);
 
     // Per-task tables (task 0, 1, 2)
     for task in 0..3_u8 {
         let t = task as usize;
         build_l3(PT_L3_TASK0 + t, task);
         build_l2_ram(PT_L2_RAM_TASK0 + t, PT_L3_TASK0 + t);
-        build_l1(PT_L1_TASK0 + t, PT_L2_RAM_TASK0 + t);
+        build_l1(PT_L1_TASK0 + t, PT_L2_RAM_TASK0 + t, PT_L2_DEVICE_0 + t);
     }
 
     // Kernel boot tables (owner_task = 0xFF → all user stacks EL1-only)
     build_l3(PT_L3_KERNEL, 0xFF);
     build_l2_ram(PT_L2_RAM_KERNEL, PT_L3_KERNEL);
-    build_l1(PT_L1_KERNEL, PT_L2_RAM_KERNEL);
+    build_l1(PT_L1_KERNEL, PT_L2_RAM_KERNEL, PT_L2_DEVICE_KERNEL);
 
     // Flush page table writes to memory
     core::arch::asm!(
@@ -345,13 +367,137 @@ pub unsafe extern "C" fn mmu_init() {
     );
 }
 
+// ─── Phase J3: Device MMIO mapping ─────────────────────────────────
+
+/// Device registry — whitelisted devices that can be mapped for EL0 tasks.
+/// GIC MMIO (L2 indices 64–66) is NEVER exposed — only safe peripherals.
+pub struct DeviceInfo {
+    /// L2 entry index (e.g., 72 for UART at 0x0900_0000)
+    pub l2_index: usize,
+    /// Hardware INTID for IRQ routing (e.g., 33 for UART0)
+    pub intid: u32,
+    /// Human-readable name
+    pub name: &'static str,
+}
+
+/// Device table — device_id indexes into this array.
+pub const DEVICES: &[DeviceInfo] = &[
+    DeviceInfo { l2_index: 72, intid: 33, name: "UART0" }, // device_id=0
+];
+
+/// Maximum device_id (for host tests)
+pub const MAX_DEVICE_ID: usize = 0; // only UART0 for now
+
+// Error codes for map_device_for_task
+pub const DEVICE_MAP_ERR_INVALID_ID: u64 = 0xFFFF_2001;
+pub const DEVICE_MAP_ERR_INVALID_TASK: u64 = 0xFFFF_2002;
+
+/// Map a device's MMIO region into a task's L2_device table as DEVICE_BLOCK_EL0.
+/// This allows the EL0 task to directly read/write the device's MMIO registers.
+///
+/// Safety: device_id must index into DEVICES. GIC is never exposed.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
+    let did = device_id as usize;
+    if did >= DEVICES.len() {
+        crate::uart_print("!!! DEVICE MAP: invalid device_id\n");
+        return DEVICE_MAP_ERR_INVALID_ID;
+    }
+    if task_id >= 3 {
+        crate::uart_print("!!! DEVICE MAP: invalid task_id\n");
+        return DEVICE_MAP_ERR_INVALID_TASK;
+    }
+
+    let dev = &DEVICES[did];
+    let l2_device = table_ptr(PT_L2_DEVICE_0 + task_id);
+    let pa = (dev.l2_index as u64) * 0x20_0000;
+
+    // Upgrade entry from DEVICE_BLOCK (EL1-only) to DEVICE_BLOCK_EL0 (EL0 accessible)
+    write_entry(l2_device, dev.l2_index, pa | DEVICE_BLOCK_EL0);
+
+    // TLB invalidate for this task's ASID
+    let asid = (task_id as u64 + 1) << 48;
+    core::arch::asm!(
+        "tlbi aside1is, {asid}",
+        "dsb ish",
+        "isb",
+        asid = in(reg) asid,
+        options(nomem, nostack)
+    );
+
+    crate::uart_print("[AegisOS] DEVICE MAP: ");
+    crate::uart_print(dev.name);
+    crate::uart_print(" -> task ");
+    crate::uart_print_hex(task_id as u64);
+    crate::uart_print("\n");
+
+    0 // success
+}
+
+/// Host-test stub for map_device_for_task
+#[cfg(not(target_arch = "aarch64"))]
+pub fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
+    let did = device_id as usize;
+    if did >= DEVICES.len() {
+        return DEVICE_MAP_ERR_INVALID_ID;
+    }
+    if task_id >= 3 {
+        return DEVICE_MAP_ERR_INVALID_TASK;
+    }
+    0 // success
+}
+
+// ─── Phase J1: Grant page mapping ──────────────────────────────────
+
+/// Map a grant page into a task's L3 table as AP_RW_EL0 (user accessible).
+/// Must be followed by TLB invalidation for the task's ASID.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn map_grant_for_task(grant_phys: u64, task_id: usize) {
+    let l3 = table_ptr(PT_L3_TASK0 + task_id);
+    let base: u64 = 0x4000_0000;
+    let index = ((grant_phys - base) / 4096) as usize;
+    if index < 512 {
+        write_entry(l3, index, grant_phys | USER_DATA_PAGE);
+        // TLB invalidate for this task's ASID
+        let asid = (task_id as u64 + 1) << 48;
+        core::arch::asm!(
+            "tlbi aside1is, {asid}",
+            "dsb ish",
+            "isb",
+            asid = in(reg) asid,
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// Unmap a grant page from a task's L3 table (revert to AP_RW_EL1, EL0 no access).
+/// Must be followed by TLB invalidation for the task's ASID.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn unmap_grant_for_task(grant_phys: u64, task_id: usize) {
+    let l3 = table_ptr(PT_L3_TASK0 + task_id);
+    let base: u64 = 0x4000_0000;
+    let index = ((grant_phys - base) / 4096) as usize;
+    if index < 512 {
+        write_entry(l3, index, grant_phys | KERNEL_DATA_PAGE);
+        // TLB invalidate for this task's ASID
+        let asid = (task_id as u64 + 1) << 48;
+        core::arch::asm!(
+            "tlbi aside1is, {asid}",
+            "dsb ish",
+            "isb",
+            asid = in(reg) asid,
+            options(nomem, nostack)
+        );
+    }
+}
+
 /// Enable MMU — called from assembly after mmu_init()
 /// This is kept in Rust for the register constant values, but the actual
 /// MSR sequence is in boot.s for precise control over instruction ordering.
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_get_config(out: *mut [u64; 4]) {
-    // Kernel boot L1 (page 10) — no EL0 user stack access
+    // Kernel boot L1 (page 13) — no EL0 user stack access
     let l1_kernel = table_ptr(PT_L1_KERNEL);
     (*out)[0] = MAIR_VALUE;
     (*out)[1] = TCR_VALUE;

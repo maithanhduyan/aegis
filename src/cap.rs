@@ -39,6 +39,16 @@ pub const CAP_IPC_RECV_EP2: CapBits = 1 << 9;
 pub const CAP_IPC_SEND_EP3: CapBits = 1 << 10;
 /// Permission to receive IPC on endpoint 3
 pub const CAP_IPC_RECV_EP3: CapBits = 1 << 11;
+/// Permission to create shared memory grants (SYS_GRANT_CREATE)
+pub const CAP_GRANT_CREATE: CapBits = 1 << 12;
+/// Permission to revoke shared memory grants (SYS_GRANT_REVOKE)
+pub const CAP_GRANT_REVOKE: CapBits = 1 << 13;
+/// Permission to bind an IRQ to a notification (SYS_IRQ_BIND)
+pub const CAP_IRQ_BIND: CapBits = 1 << 14;
+/// Permission to acknowledge an IRQ (SYS_IRQ_ACK)
+pub const CAP_IRQ_ACK: CapBits = 1 << 15;
+/// Permission to map a device's MMIO into user-space (SYS_DEVICE_MAP)
+pub const CAP_DEVICE_MAP: CapBits = 1 << 16;
 
 // ─── Convenience combos ────────────────────────────────────────────
 
@@ -54,7 +64,12 @@ pub const CAP_ALL: CapBits = CAP_IPC_SEND_EP0
     | CAP_IPC_SEND_EP2
     | CAP_IPC_RECV_EP2
     | CAP_IPC_SEND_EP3
-    | CAP_IPC_RECV_EP3;
+    | CAP_IPC_RECV_EP3
+    | CAP_GRANT_CREATE
+    | CAP_GRANT_REVOKE
+    | CAP_IRQ_BIND
+    | CAP_IRQ_ACK
+    | CAP_DEVICE_MAP;
 
 /// No capabilities
 pub const CAP_NONE: CapBits = 0;
@@ -109,6 +124,16 @@ pub fn cap_for_syscall(syscall_nr: u64, ep_id: u64) -> CapBits {
         5 => CAP_NOTIFY,
         // SYS_WAIT_NOTIFY = 6
         6 => CAP_WAIT_NOTIFY,
+        // SYS_GRANT_CREATE = 7
+        7 => CAP_GRANT_CREATE,
+        // SYS_GRANT_REVOKE = 8
+        8 => CAP_GRANT_REVOKE,
+        // SYS_IRQ_BIND = 9
+        9 => CAP_IRQ_BIND,
+        // SYS_IRQ_ACK = 10
+        10 => CAP_IRQ_ACK,
+        // SYS_DEVICE_MAP = 11
+        11 => CAP_DEVICE_MAP,
         // Unknown syscall — no valid cap
         _ => 0,
     }
@@ -130,6 +155,11 @@ pub fn cap_name(cap: CapBits) -> &'static str {
         CAP_IPC_RECV_EP2  => "IPC_RECV_EP2",
         CAP_IPC_SEND_EP3  => "IPC_SEND_EP3",
         CAP_IPC_RECV_EP3  => "IPC_RECV_EP3",
+        CAP_GRANT_CREATE  => "GRANT_CREATE",
+        CAP_GRANT_REVOKE  => "GRANT_REVOKE",
+        CAP_IRQ_BIND      => "IRQ_BIND",
+        CAP_IRQ_ACK       => "IRQ_ACK",
+        CAP_DEVICE_MAP    => "DEVICE_MAP",
         CAP_ALL           => "ALL",
         CAP_NONE          => "NONE",
         _                 => "UNKNOWN",

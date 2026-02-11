@@ -75,7 +75,7 @@ try {
     if (-not $process.WaitForExit($TimeoutSec * 1000)) {
         # Timeout — kill QEMU (expected, since kernel loops forever)
         $process.Kill()
-        $process.WaitForExit(3000)
+        $process.WaitForExit(3000) | Out-Null
     }
 
     $script:output = $process.StandardOutput.ReadToEnd()
@@ -97,11 +97,14 @@ Check-Output "Exceptions ready"       "[AegisOS] exceptions ready"
 Check-Output "Scheduler ready"        "[AegisOS] scheduler ready"
 Check-Output "Capabilities assigned"  "[AegisOS] capabilities assigned"
 Check-Output "Notification ready"     "[AegisOS] notification system ready"
+Check-Output "Grant system ready"     "[AegisOS] grant system ready"
+Check-Output "IRQ routing ready"      "[AegisOS] IRQ routing ready"
+Check-Output "Device MMIO ready"      "[AegisOS] device MMIO mapping ready"
 Check-Output "Address spaces assigned" "[AegisOS] per-task address spaces assigned"
 Check-Output "Timer started"          "[AegisOS] timer started"
-Check-Output "Bootstrap into EL0"     "[AegisOS] bootstrapping into task_a"
-Check-Output "Task A sends PING"      "A:PING"
-Check-Output "Task B sends PONG"      "B:PONG"
+Check-Output "Bootstrap into EL0"     "[AegisOS] bootstrapping into uart_driver"
+Check-Output "UART Driver ready"      "DRV:ready"
+Check-Output "Client uses driver"     "J4:UserDrv"
 
 # ─── Summary ───────────────────────────────────────────────────────
 Write-Host ""

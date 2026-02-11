@@ -15,6 +15,7 @@ const GICC_BASE: usize = 0x0801_0000;
 
 const GICD_CTLR: usize = 0x000;
 const GICD_ISENABLER: usize = 0x100; // Set-enable (1 bit per INTID, registers of 32 bits)
+const GICD_ICENABLER: usize = 0x180; // Clear-enable (write-1-to-disable, 1 bit per INTID)
 const GICD_IPRIORITYR: usize = 0x400; // Priority (1 byte per INTID)
 
 // ─── GICC register offsets ─────────────────────────────────────────
@@ -77,6 +78,15 @@ pub fn enable_intid(intid: u32) {
 
     let val = gicd_read(offset);
     gicd_write(offset, val | bit);
+}
+
+/// Disable (mask) a specific interrupt ID.
+/// GICD_ICENABLER uses write-1-to-clear semantics — no read-modify-write needed.
+pub fn disable_intid(intid: u32) {
+    let reg_index = (intid / 32) as usize;
+    let bit = 1u32 << (intid % 32);
+    let offset = GICD_ICENABLER + reg_index * 4;
+    gicd_write(offset, bit);
 }
 
 /// Set priority for a specific INTID (0 = highest, 0xFF = lowest)
