@@ -1,6 +1,6 @@
 # Kế hoạch Phase H — Per-Task Address Space
 
-> **Trạng thái: 📋 DRAFT** — Mỗi task có bảng trang riêng (per-task page table). Task A không thể đọc/ghi bộ nhớ của Task B, kể cả cùng chạy ở EL0. TTBR0_EL1 được swap khi context switch + ASID tag TLB. Đây là lớp cách ly bộ nhớ bắt buộc cho safety-critical (DO-178C §5.3.1 — memory partitioning, ISO 26262 Part 6 §7.4.6 — freedom from interference).
+> **Trạng thái: ✅ HOÀN THÀNH** — Mỗi task có bảng trang riêng (per-task page table). Task A không thể đọc/ghi bộ nhớ của Task B, kể cả cùng chạy ở EL0. TTBR0_EL1 được swap khi context switch + ASID tag TLB. Đây là lớp cách ly bộ nhớ bắt buộc cho safety-critical (DO-178C §5.3.1 — memory partitioning, ISO 26262 Part 6 §7.4.6 — freedom from interference).
 
 ---
 
