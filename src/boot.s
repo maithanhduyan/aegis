@@ -84,8 +84,9 @@ at_el1:
     ldr x0, =0x5B5993519
     msr tcr_el1, x0
 
-    /* TTBR0_EL1 = L1 page table base */
+    /* TTBR0_EL1 = kernel boot L1 (page 10 in .page_tables) */
     ldr x0, =__page_tables_start
+    add x0, x0, #(10 * 4096)
     msr ttbr0_el1, x0
 
     isb

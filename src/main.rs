@@ -187,6 +187,16 @@ pub extern "C" fn kernel_main() -> ! {
     }
     uart_print("[AegisOS] capabilities assigned\n");
 
+    // ─── Phase H: Assign per-task address spaces ───────────────────
+    unsafe {
+        use aegis_os::mmu;
+        // ASID = task_id + 1 (ASID 0 is reserved for kernel boot)
+        sched::TCBS[0].ttbr0 = mmu::ttbr0_for_task(0, 1);
+        sched::TCBS[1].ttbr0 = mmu::ttbr0_for_task(1, 2);
+        sched::TCBS[2].ttbr0 = mmu::ttbr0_for_task(2, 3);
+    }
+    uart_print("[AegisOS] per-task address spaces assigned\n");
+
     timer::init(10);
 
     uart_print("[AegisOS] bootstrapping into task_a (EL0)...\n");

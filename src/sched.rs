@@ -38,6 +38,7 @@ pub struct Tcb {
     pub user_stack_top: u64,  // original SP_EL0 top (for restart)
     pub fault_tick: u64,      // tick when task was marked Faulted
     pub caps: CapBits,        // capability bitmask (survives restart)
+    pub ttbr0: u64,           // TTBR0_EL1 value (ASID << 48 | L1 base)
 }
 
 // ─── Static task table ─────────────────────────────────────────────
@@ -66,6 +67,7 @@ pub const EMPTY_TCB: Tcb = Tcb {
     user_stack_top: 0,
     fault_tick: 0,
     caps: 0,
+    ttbr0: 0,
 };
 
 // ─── Public API ────────────────────────────────────────────────────
@@ -190,6 +192,18 @@ pub fn schedule(frame: &mut TrapFrame) {
             frame as *mut TrapFrame,
             1,
         );
+
+        // Phase H: Switch TTBR0 to the new task's page table
+        #[cfg(target_arch = "aarch64")]
+        {
+            let ttbr0 = TCBS[next].ttbr0;
+            core::arch::asm!(
+                "msr ttbr0_el1, {val}",
+                "isb",
+                val = in(reg) ttbr0,
+                options(nomem, nostack)
+            );
+        }
     }
 }
 
@@ -312,9 +326,13 @@ pub fn bootstrap() -> ! {
         CURRENT = 0;
 
         let frame = &TCBS[0].context;
+        let ttbr0 = TCBS[0].ttbr0;
 
         // Load the task's context into registers and eret into EL0
         core::arch::asm!(
+            // Phase H: Switch TTBR0 to task 0's per-task page table
+            "msr ttbr0_el1, {ttbr0}",
+            "isb",
             // Set ELR_EL1 = task entry, SPSR_EL1 = 0x000 (EL0t)
             "msr elr_el1, {elr}",
             "msr spsr_el1, {spsr}",
@@ -323,6 +341,7 @@ pub fn bootstrap() -> ! {
             // eret: CPU restores PSTATE from SPSR (EL0t), PC from ELR.
             // Task runs at EL0 with SP = SP_EL0 (user stack).
             "eret",
+            ttbr0 = in(reg) ttbr0,
             elr = in(reg) frame.elr_el1,
             spsr = in(reg) frame.spsr_el1,
             sp0 = in(reg) frame.sp_el0,

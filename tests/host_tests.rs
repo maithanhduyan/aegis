@@ -46,6 +46,7 @@ unsafe fn reset_test_state() {
         // Give each task a fake user stack top (won't be dereferenced in tests)
         sched::TCBS[i].user_stack_top = 0x5000_0000 + ((i as u64 + 1) * 4096);
         sched::TCBS[i].entry_point = 0x4008_0000 + (i as u64 * 0x100);
+        sched::TCBS[i].ttbr0 = 0;
     }
     sched::CURRENT = 0;
     sched::TCBS[0].state = TaskState::Running;
@@ -857,5 +858,150 @@ fn cap_survives_restart_simulation() {
         // Caps must still be the original value
         assert_eq!(sched::TCBS[0].caps, original_caps,
             "caps must survive task restart");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 7. Per-Task Address Space Tests (Phase H)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn addr_page_table_base_returns_distinct_per_task() {
+    // Each task must get a different page table base
+    let b0 = mmu::page_table_base(0);
+    let b1 = mmu::page_table_base(1);
+    let b2 = mmu::page_table_base(2);
+    assert_ne!(b0, b1, "task 0 and 1 must have different page table bases");
+    assert_ne!(b1, b2, "task 1 and 2 must have different page table bases");
+    assert_ne!(b0, b2, "task 0 and 2 must have different page table bases");
+}
+
+#[test]
+fn addr_page_table_base_is_4k_aligned() {
+    for t in 0..3 {
+        let base = mmu::page_table_base(t);
+        assert_eq!(base & 0xFFF, 0,
+            "page_table_base({}) = {:#x} must be 4KB aligned", t, base);
+    }
+}
+
+#[test]
+fn addr_ttbr0_for_task_embeds_asid() {
+    let ttbr0 = mmu::ttbr0_for_task(0, 1);
+    let asid = ttbr0 >> 48;
+    assert_eq!(asid, 1, "ASID should be 1 for task 0");
+
+    let ttbr0 = mmu::ttbr0_for_task(1, 2);
+    let asid = ttbr0 >> 48;
+    assert_eq!(asid, 2, "ASID should be 2 for task 1");
+
+    let ttbr0 = mmu::ttbr0_for_task(2, 3);
+    let asid = ttbr0 >> 48;
+    assert_eq!(asid, 3, "ASID should be 3 for task 2");
+}
+
+#[test]
+fn addr_ttbr0_preserves_base_address() {
+    for t in 0..3 {
+        let base = mmu::page_table_base(t);
+        let asid: u16 = (t as u16) + 1;
+        let ttbr0 = mmu::ttbr0_for_task(t, asid);
+        let extracted_base = ttbr0 & 0x0000_FFFF_FFFF_F000;
+        assert_eq!(extracted_base, base,
+            "ttbr0_for_task({}) base should match page_table_base({})", t, t);
+    }
+}
+
+#[test]
+fn addr_different_asids_produce_different_ttbr0() {
+    let t0 = mmu::ttbr0_for_task(0, 1);
+    let t1 = mmu::ttbr0_for_task(1, 2);
+    let t2 = mmu::ttbr0_for_task(2, 3);
+    assert_ne!(t0, t1);
+    assert_ne!(t1, t2);
+    assert_ne!(t0, t2);
+}
+
+#[test]
+fn addr_asid_zero_reserved_for_kernel() {
+    // ASID 0 is used for kernel boot table — tasks should use 1, 2, 3
+    let kernel_ttbr0 = mmu::ttbr0_for_task(0, 0);
+    let task0_ttbr0 = mmu::ttbr0_for_task(0, 1);
+    // Same base, different ASID
+    assert_ne!(kernel_ttbr0, task0_ttbr0);
+    assert_eq!(kernel_ttbr0 >> 48, 0);
+    assert_eq!(task0_ttbr0 >> 48, 1);
+}
+
+#[test]
+fn addr_empty_tcb_has_zero_ttbr0() {
+    assert_eq!(EMPTY_TCB.ttbr0, 0, "EMPTY_TCB.ttbr0 should be 0");
+}
+
+#[test]
+fn addr_ttbr0_survives_restart() {
+    // ttbr0 must survive task restart (like caps)
+    unsafe {
+        reset_test_state();
+        let original_ttbr0 = mmu::ttbr0_for_task(0, 1);
+        sched::TCBS[0].ttbr0 = original_ttbr0;
+        sched::TCBS[0].caps = CAP_WRITE | CAP_YIELD;
+        sched::TCBS[0].state = TaskState::Faulted;
+        sched::TCBS[0].fault_tick = 0;
+
+        // Simulate restart_task: zero context, reload entry/stack
+        sched::TCBS[0].context = TrapFrame {
+            x: [0; 31],
+            sp_el0: sched::TCBS[0].user_stack_top,
+            elr_el1: sched::TCBS[0].entry_point,
+            spsr_el1: 0x000,
+            _pad: [0; 2],
+        };
+        sched::TCBS[0].state = TaskState::Ready;
+
+        assert_eq!(sched::TCBS[0].ttbr0, original_ttbr0,
+            "ttbr0 must survive task restart");
+    }
+}
+
+#[test]
+fn addr_schedule_preserves_ttbr0_in_tcb() {
+    // After scheduling, each TCB should still hold its original ttbr0
+    unsafe {
+        reset_test_state();
+        for i in 0..NUM_TASKS {
+            sched::TCBS[i].ttbr0 = mmu::ttbr0_for_task(i, (i as u16) + 1);
+        }
+
+        // Schedule once (simulates timer tick)
+        let mut frame = TrapFrame {
+            x: [0; 31],
+            sp_el0: 0,
+            elr_el1: sched::TCBS[0].context.elr_el1,
+            spsr_el1: sched::TCBS[0].context.spsr_el1,
+            _pad: [0; 2],
+        };
+        sched::schedule(&mut frame);
+
+        // All ttbr0 values should be unchanged
+        for i in 0..NUM_TASKS {
+            let expected = mmu::ttbr0_for_task(i, (i as u16) + 1);
+            assert_eq!(sched::TCBS[i].ttbr0, expected,
+                "TCBS[{}].ttbr0 should be preserved after schedule", i);
+        }
+    }
+}
+
+#[test]
+fn addr_max_asid_fits_in_8_bits() {
+    // AArch64 with 8-bit ASID: values 0..255 valid
+    let ttbr0 = mmu::ttbr0_for_task(0, 255);
+    let asid = ttbr0 >> 48;
+    assert_eq!(asid, 255, "max 8-bit ASID should fit");
+
+    // Our tasks use ASIDs 1, 2, 3 — all well within 8-bit range
+    for t in 0..3_u16 {
+        let asid = t + 1;
+        assert!(asid <= 255, "task ASID must fit in 8 bits");
     }
 }

@@ -1,3 +1,10 @@
+---
+lang: vi
+title: "🎫 Giấy Phép Cho Phần Mềm — Ai Được Làm Gì?"
+description: "Bài #7 trong chuỗi AegisOS — dành cho bạn nhỏ mơ làm kỹ sư. Hôm nay: Capability — hệ thống 'giấy phép' kiểm soát từng hành động của từng chương trình."
+tags: "capability, security, aegisos"
+date: 2026-02-11
+---
 # 🎫 Giấy Phép Cho Phần Mềm — Ai Được Làm Gì?
 
 > *Bài #7 trong chuỗi AegisOS — dành cho bạn nhỏ mơ làm kỹ sư. Hôm nay: Capability — hệ thống "giấy phép" kiểm soát từng hành động của từng chương trình.*

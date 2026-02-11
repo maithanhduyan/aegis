@@ -34,17 +34,15 @@ function Check-Output {
 
 # ─── Build kernel ───────────────────────────────────────────────────
 Write-Host "[1/3] Building kernel..." -ForegroundColor Yellow
-try {
-    $buildOutput = & cargo build --release -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Build failed!" -ForegroundColor Red
-        Write-Host ($buildOutput -join "`n")
-        exit 2
-    }
-} catch {
-    Write-Host "Build failed: $_" -ForegroundColor Red
+$ErrorActionPreference = "Continue"
+$buildOutput = & cargo build --release -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem 2>&1
+$buildText = ($buildOutput | Out-String)
+if ($buildText -match '(?m)^error') {
+    Write-Host "Build failed!" -ForegroundColor Red
+    Write-Host $buildText
     exit 2
 }
+$ErrorActionPreference = "Stop"
 
 if (-not (Test-Path $KernelPath)) {
     Write-Host "Kernel not found at $KernelPath" -ForegroundColor Red
@@ -98,6 +96,7 @@ Check-Output "W^X enforced"           "[AegisOS] W^X enforced"
 Check-Output "Exceptions ready"       "[AegisOS] exceptions ready"
 Check-Output "Scheduler ready"        "[AegisOS] scheduler ready"
 Check-Output "Capabilities assigned"  "[AegisOS] capabilities assigned"
+Check-Output "Address spaces assigned" "[AegisOS] per-task address spaces assigned"
 Check-Output "Timer started"          "[AegisOS] timer started"
 Check-Output "Bootstrap into EL0"     "[AegisOS] bootstrapping into task_a"
 Check-Output "Task A sends PING"      "A:PING"

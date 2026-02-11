@@ -1,3 +1,11 @@
+---
+lang: vi
+title: "🛡️ Khi Một Task Ngã, Cả Hệ Thống Không Được Ngã Theo"
+tags: "fault isolation, reliability, aegisos"
+description: "Bài #5 trong chuỗi AegisOS — dành cho bạn nhỏ mơ làm kỹ sư. Hôm nay: Fault Isolation — nghệ thuật giữ cho hệ thống vẫn chạy khi có thứ gì đó hỏng."
+date: 2026-02-11
+---
+
 # 🛡️ Khi Một Task Ngã, Cả Hệ Thống Không Được Ngã Theo
 
 > *Bài #5 trong chuỗi AegisOS — dành cho bạn nhỏ mơ làm kỹ sư. Hôm nay: Fault Isolation — nghệ thuật giữ cho hệ thống vẫn chạy khi có thứ gì đó hỏng.*

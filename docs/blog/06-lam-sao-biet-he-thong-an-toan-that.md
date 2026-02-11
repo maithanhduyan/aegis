@@ -1,3 +1,11 @@
+---
+lang: vi
+title: "🧪 Làm Sao Biết Hệ Thống An Toàn Thật — Chứ Không Chỉ 'Thấy Chạy Được'?"
+description: "Bài #6 trong chuỗi AegisOS — dành cho bạn nhỏ mơ làm kỹ sư. Hôm nay: Testing — nghệ thuật tìm lỗi trước khi lỗi tìm ra người."
+tags: "testing, reliability, aegisos"
+date: 2026-02-11
+---
+
 # 🧪 Làm Sao Biết Hệ Thống An Toàn Thật — Chứ Không Chỉ "Thấy Chạy Được"?
 
 > *Bài #6 trong chuỗi AegisOS — dành cho bạn nhỏ mơ làm kỹ sư. Hôm nay: Testing — nghệ thuật tìm lỗi trước khi lỗi tìm ra người.*
