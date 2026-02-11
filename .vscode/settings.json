@@ -11,6 +11,14 @@
     "files.trimFinalNewlines": true,
     "files.trimTrailingWhitespace": true,
     "files.insertFinalNewline": true,
-    "chat.agent.maxRequests": 5000
+    "chat.agent.maxRequests": 5000,
+    "chat.tools.terminal.autoApprove": {
+        "cargo build": true,
+        "cargo test": true,
+        "/^powershell -ExecutionPolicy Bypass -File tests/qemu_boot_test\\.ps1 2>&1$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
 
 }

@@ -1,6 +1,6 @@
 # Kế hoạch Phase G — Capability-Based Access Control
 
-> **Trạng thái: 📝 DRAFT** — Thêm hệ thống "giấy phép" (capability) cho AegisOS: mỗi task chỉ được gọi syscall mà nó có quyền. Task không có quyền → bị fault + auto-restart. Đây là lớp kiểm soát truy cập bắt buộc cho safety-critical (DO-178C §5.3, IEC 62304 §5.3 — access control).
+> **Trạng thái: ✅ HOÀN THÀNH** — Thêm hệ thống "giấy phép" (capability) cho AegisOS: mỗi task chỉ được gọi syscall mà nó có quyền. Task không có quyền → bị fault + auto-restart. Đây là lớp kiểm soát truy cập bắt buộc cho safety-critical (DO-178C §5.3, IEC 62304 §5.3 — access control).
 
 ---
 
