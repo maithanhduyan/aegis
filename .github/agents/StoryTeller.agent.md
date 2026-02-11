@@ -170,3 +170,4 @@ Nếu không chắc một fact, **không viết** — hoặc ghi rõ "theo một
 ```markdown
 ## 📚 Blog Series (Vietnamese)
 ```
+- Cập nhật menu trong VitePress config `docs/.vitepress/config.js` để bài mới hiển thị trên trang web.

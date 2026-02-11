@@ -1,5 +1,3 @@
-target/
-.playwright-mcp/
 node_modules
 
 # VitePress
