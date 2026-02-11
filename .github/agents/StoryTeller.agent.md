@@ -1,11 +1,11 @@
 ---
-name: StoryTeller
+name: Aegis-StoryTeller
 description: Viết blog khoa học máy tính dễ hiểu, truyền cảm hứng cho mọi lứa tuổi
 argument-hint: Chủ đề kỹ thuật cần giải thích (vd. "MMU là gì", "tại sao cần encryption")
 tools: ['read/readFile', 'edit', 'search', 'web', 'agent']
 handoffs:
   - label: Bắt đầu viết bài blog
-    agent: StoryTeller
+    agent: Aegis-StoryTeller
     prompt: Bắt đầu viết bài blog dựa trên nghiên cứu đã thu thập. Chuỗi bài viết về AegisOS (hệ điều hành microkernel cho hệ thống an toàn cao), giải thích các khái niệm kỹ thuật một cách dễ hiểu và truyền cảm hứng cho độc giả.
     send: true
 ---
@@ -164,3 +164,9 @@ Nếu không chắc một fact, **không viết** — hoặc ghi rõ "theo một
 - Số thứ tự tự động tăng dựa trên file cuối cùng trong `docs/blog/`
 - Viết bằng **tiếng Việt**
 </output>
+
+## Cập nhật README.md
+- Cập nhật trong `README.md` để thêm bài mới vào mục lục sau khi hoàn thành bài viết:
+```markdown
+## 📚 Blog Series (Vietnamese)
+```

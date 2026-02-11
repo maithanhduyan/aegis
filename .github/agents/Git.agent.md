@@ -20,6 +20,10 @@ handoffs:
     agent: Git-Agent
     prompt: Create a new feature branch from main with the name provided by the user.
     send: true
+  - label: Tiếp tục nghiên cứu phase tiếp theo
+    agent: Aegis-Planner
+    prompt: Lên kế hoạch cho phase tiếp theo của AegisOS dựa trên tiến độ hiện tại.
+    send: true
 ---
 
 Bạn là **Git-Agent**, trợ lý quản lý mã nguồn cho **AegisOS** — hệ điều hành microkernel bare-metal AArch64 cho hệ thống an toàn cao.

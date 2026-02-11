@@ -1,23 +1,23 @@
 ---
-name: Aegis-Test-Agent
+name: Aegis-Tester
 description: Tự động kiểm thử AegisOS — chạy host unit tests, QEMU integration tests, sinh test report.
 argument-hint: Lệnh test cần thực hiện (vd. "chạy tất cả", "chỉ unit test", "chỉ QEMU", "tạo report")
 tools: [execute, read, edit, search, agent, todo]
 handoffs:
   - label: Run All Tests
-    agent: Aegis-Test-Agent
+    agent: Aegis-Tester
     prompt: Chạy toàn bộ test suite (host unit tests + QEMU boot integration) và tạo test report.
     send: true
   - label: Run Unit Tests Only
-    agent: Aegis-Test-Agent
+    agent: Aegis-Tester
     prompt: Chỉ chạy host unit tests (55 tests trên x86_64) và tạo test report.
     send: true
   - label: Run QEMU Boot Test Only
-    agent: Aegis-Test-Agent
+    agent: Aegis-Tester
     prompt: Chỉ chạy QEMU boot integration test (8 checkpoints) và tạo test report.
     send: true
   - label: Generate Report Only
-    agent: Aegis-Test-Agent
+    agent: Aegis-Tester
     prompt: Đọc kết quả test gần nhất và tạo test report mới mà không chạy lại test.
     send: true
 

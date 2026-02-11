@@ -10,9 +10,12 @@
 ├── rust-toolchain.toml
 └── src
     ├── boot.s
+    ├── cap.rs
     ├── exception.rs
     ├── gic.rs
+    ├── grant.rs
     ├── ipc.rs
+    ├── irq.rs
     ├── lib.rs
     ├── main.rs
     ├── mmu.rs
@@ -95,11 +98,13 @@ SECTIONS
         __bss_end = .;
     }
 
-    /* === Page Tables (4 × 4096 = 16 KiB, 4KB-aligned) === */
+    /* === Page Tables (16 × 4096 = 64 KiB, 4KB-aligned) === */
+    /* Layout: [0..2]=L2_device per task, [3..5]=L1 per task, [6..8]=L2_ram per task,
+       [9..11]=L3 per task, [12]=L2_device kernel, [13]=L1 kernel, [14]=L2_ram kernel, [15]=L3 kernel */
     . = ALIGN(4096);
     __page_tables_start = .;
     .page_tables (NOLOAD) : {
-        . += 4 * 4096;
+        . += 16 * 4096;
     }
     __page_tables_end = .;
 
@@ -120,6 +125,15 @@ SECTIONS
         . += 3 * 4096;
     }
     __user_stacks_end = .;
+
+    /* === Grant Pages (2 × 4KB = 8 KiB, 4KB-aligned) === */
+    /* Shared memory regions for inter-task data sharing (Phase J) */
+    . = ALIGN(4096);
+    __grant_pages_start = .;
+    .grant_pages (NOLOAD) : {
+        . += 2 * 4096;
+    }
+    __grant_pages_end = .;
 
     /* === Stack Guard Page (4KB invalid — catches stack overflow) === */
     . = ALIGN(4096);
@@ -167,16 +181,19 @@ _start:
 
 1:
     /* Setup stack pointer */
+    /* Cài đặt con trỏ ngăn xếp */
     ldr x0, =__stack_end
     mov sp, x0
 
     /* Check EL — QEMU virt may start at EL2 or EL1 */
+    /* Kiểm tra EL — QEMU virt có thể khởi động ở EL2 hoặc EL1 */
     mrs x0, CurrentEL
     lsr x0, x0, #2
     cmp x0, #2
     b.ne at_el1
 
     /* === Drop from EL2 to EL1 === */
+    /* Chuyển từ EL2 xuống EL1 */
     mrs x0, hcr_el2
     orr x0, x0, #(1 << 31)   /* HCR_EL2.RW = 1 (EL1 is AArch64) */
     msr hcr_el2, x0
@@ -186,17 +203,20 @@ _start:
     msr hstr_el2, xzr
 
     /* SCTLR_EL1 reset value */
+    /* Giá trị khởi tạo SCTLR_EL1 */
     mov x0, #0x0800
     movk x0, #0x30D0, lsl #16
     msr sctlr_el1, x0
 
     /* Enable EL1 physical timer access from EL2 */
+    /* Cho phép EL1 truy cập bộ đếm thời gian vật lý từ EL2 */
     mrs x0, CNTHCTL_EL2
     orr x0, x0, #3        /* EL1PCTEN + EL1PCEN */
     msr CNTHCTL_EL2, x0
     msr CNTVOFF_EL2, xzr  /* Zero virtual offset */
 
     /* Return to EL1h */
+    /* Quay lại EL1h */
     mov x0, #0x3C5
     msr spsr_el2, x0
     adr x0, at_el1
@@ -205,10 +225,12 @@ _start:
 
 at_el1:
     /* Re-setup SP (SP_EL1 after eret) */
+    /* Cài đặt lại con trỏ ngăn xếp (SP_EL1 sau eret) */
     ldr x0, =__stack_end
     mov sp, x0
 
     /* Clear BSS + page tables */
+    /* Xóa BSS + bảng trang */
     ldr x0, =__bss_start
     ldr x1, =__page_tables_end
 
@@ -222,9 +244,11 @@ at_el1:
     /* === MMU Setup === */
 
     /* Build page tables in Rust */
+    /* Khởi tạo bảng trang trong Rust */
     bl  mmu_init
 
     /* Invalidate all TLB entries */
+    /* Vô hiệu hóa tất cả các mục TLB */
     tlbi vmalle1
     dsb  ish
     isb
@@ -235,16 +259,20 @@ at_el1:
     msr mair_el1, x0
 
     /* TCR_EL1: 39-bit VA, 4KB granule, TTBR0 only, 48-bit PA */
+    /* TCR_EL1: 39-bit địa chỉ ảo, kích thước trang 4KB, chỉ dùng TTBR0, 48-bit địa chỉ vật lý */
     ldr x0, =0x5B5993519
     msr tcr_el1, x0
 
-    /* TTBR0_EL1 = L1 page table base */
+    /* TTBR0_EL1 = kernel boot L1 (page 13 in .page_tables) */
+    /* TTBR0_EL1 = bảng trang cấp 1 khởi động kernel (trang 13 trong .page_tables) */
     ldr x0, =__page_tables_start
+    add x0, x0, #(13 * 4096)
     msr ttbr0_el1, x0
 
     isb
 
     /* Enable MMU: set M + C + SA + I + WXN in SCTLR_EL1 */
+    /* Bật MMU: đặt các bit M + C + SA + I + WXN trong SCTLR_EL1 */
     mrs x0, sctlr_el1
     ldr x1, =0x0008100D
     orr x0, x0, x1
@@ -252,11 +280,184 @@ at_el1:
     isb
 
     /* MMU is now active — jump to Rust */
+    /* MMU đã được kích hoạt — nhảy vào Rust */
     bl  kernel_main
 
 4:
     wfe
     b 4b
+
+```
+
+## File ./src\cap.rs:
+```rust
+/// AegisOS Capability Module — Flat bitmask access control
+///
+/// Each task holds a `CapBits` (u64) bitmask in its TCB.
+/// Before dispatching a syscall, the kernel checks that the task's
+/// capability mask includes the required bit(s). Unauthorized
+/// syscalls → fault (software defect in safety-critical context).
+///
+/// Design: flat u64 bitmask (not seL4 CSpace) — appropriate for
+/// a static 3-task microkernel with no heap and no dynamic cap transfer.
+
+// ─── Types ─────────────────────────────────────────────────────────
+
+/// Capability bitmask — each bit grants one permission.
+pub type CapBits = u64;
+
+// ─── Capability bit constants ──────────────────────────────────────
+
+/// Permission to send IPC on endpoint 0
+pub const CAP_IPC_SEND_EP0: CapBits = 1 << 0;
+/// Permission to receive IPC on endpoint 0
+pub const CAP_IPC_RECV_EP0: CapBits = 1 << 1;
+/// Permission to send IPC on endpoint 1
+pub const CAP_IPC_SEND_EP1: CapBits = 1 << 2;
+/// Permission to receive IPC on endpoint 1
+pub const CAP_IPC_RECV_EP1: CapBits = 1 << 3;
+/// Permission to write to UART (SYS_WRITE)
+pub const CAP_WRITE: CapBits        = 1 << 4;
+/// Permission to yield CPU (SYS_YIELD)
+pub const CAP_YIELD: CapBits        = 1 << 5;
+/// Permission to send notifications (SYS_NOTIFY)
+pub const CAP_NOTIFY: CapBits       = 1 << 6;
+/// Permission to wait for notifications (SYS_WAIT_NOTIFY)
+pub const CAP_WAIT_NOTIFY: CapBits  = 1 << 7;
+/// Permission to send IPC on endpoint 2
+pub const CAP_IPC_SEND_EP2: CapBits = 1 << 8;
+/// Permission to receive IPC on endpoint 2
+pub const CAP_IPC_RECV_EP2: CapBits = 1 << 9;
+/// Permission to send IPC on endpoint 3
+pub const CAP_IPC_SEND_EP3: CapBits = 1 << 10;
+/// Permission to receive IPC on endpoint 3
+pub const CAP_IPC_RECV_EP3: CapBits = 1 << 11;
+/// Permission to create shared memory grants (SYS_GRANT_CREATE)
+pub const CAP_GRANT_CREATE: CapBits = 1 << 12;
+/// Permission to revoke shared memory grants (SYS_GRANT_REVOKE)
+pub const CAP_GRANT_REVOKE: CapBits = 1 << 13;
+/// Permission to bind an IRQ to a notification (SYS_IRQ_BIND)
+pub const CAP_IRQ_BIND: CapBits = 1 << 14;
+/// Permission to acknowledge an IRQ (SYS_IRQ_ACK)
+pub const CAP_IRQ_ACK: CapBits = 1 << 15;
+/// Permission to map a device's MMIO into user-space (SYS_DEVICE_MAP)
+pub const CAP_DEVICE_MAP: CapBits = 1 << 16;
+
+// ─── Convenience combos ────────────────────────────────────────────
+
+/// All capabilities (for privileged tasks)
+pub const CAP_ALL: CapBits = CAP_IPC_SEND_EP0
+    | CAP_IPC_RECV_EP0
+    | CAP_IPC_SEND_EP1
+    | CAP_IPC_RECV_EP1
+    | CAP_WRITE
+    | CAP_YIELD
+    | CAP_NOTIFY
+    | CAP_WAIT_NOTIFY
+    | CAP_IPC_SEND_EP2
+    | CAP_IPC_RECV_EP2
+    | CAP_IPC_SEND_EP3
+    | CAP_IPC_RECV_EP3
+    | CAP_GRANT_CREATE
+    | CAP_GRANT_REVOKE
+    | CAP_IRQ_BIND
+    | CAP_IRQ_ACK
+    | CAP_DEVICE_MAP;
+
+/// No capabilities
+pub const CAP_NONE: CapBits = 0;
+
+// ─── Core functions ────────────────────────────────────────────────
+
+/// Check whether `caps` includes all bits in `required`.
+/// Returns `true` if the task has the required capability.
+///
+/// O(1), pure, no side effects — safe for use in hot path.
+#[inline]
+pub fn cap_check(caps: CapBits, required: CapBits) -> bool {
+    (caps & required) == required
+}
+
+/// Map a syscall number + endpoint ID to the required capability bit(s).
+///
+/// Syscall ABI: x7 = syscall_nr, x6 = endpoint_id.
+/// Returns 0 if the syscall/endpoint combo is unrecognized (caller
+/// should treat as "no cap can grant this" → fault).
+pub fn cap_for_syscall(syscall_nr: u64, ep_id: u64) -> CapBits {
+    match syscall_nr {
+        // SYS_YIELD = 0
+        0 => CAP_YIELD,
+        // SYS_SEND = 1
+        1 => match ep_id {
+            0 => CAP_IPC_SEND_EP0,
+            1 => CAP_IPC_SEND_EP1,
+            2 => CAP_IPC_SEND_EP2,
+            3 => CAP_IPC_SEND_EP3,
+            _ => 0, // invalid endpoint
+        },
+        // SYS_RECV = 2
+        2 => match ep_id {
+            0 => CAP_IPC_RECV_EP0,
+            1 => CAP_IPC_RECV_EP1,
+            2 => CAP_IPC_RECV_EP2,
+            3 => CAP_IPC_RECV_EP3,
+            _ => 0,
+        },
+        // SYS_CALL = 3: needs both send and recv on the endpoint
+        3 => match ep_id {
+            0 => CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0,
+            1 => CAP_IPC_SEND_EP1 | CAP_IPC_RECV_EP1,
+            2 => CAP_IPC_SEND_EP2 | CAP_IPC_RECV_EP2,
+            3 => CAP_IPC_SEND_EP3 | CAP_IPC_RECV_EP3,
+            _ => 0,
+        },
+        // SYS_WRITE = 4
+        4 => CAP_WRITE,
+        // SYS_NOTIFY = 5
+        5 => CAP_NOTIFY,
+        // SYS_WAIT_NOTIFY = 6
+        6 => CAP_WAIT_NOTIFY,
+        // SYS_GRANT_CREATE = 7
+        7 => CAP_GRANT_CREATE,
+        // SYS_GRANT_REVOKE = 8
+        8 => CAP_GRANT_REVOKE,
+        // SYS_IRQ_BIND = 9
+        9 => CAP_IRQ_BIND,
+        // SYS_IRQ_ACK = 10
+        10 => CAP_IRQ_ACK,
+        // SYS_DEVICE_MAP = 11
+        11 => CAP_DEVICE_MAP,
+        // Unknown syscall — no valid cap
+        _ => 0,
+    }
+}
+
+/// Return a human-readable name for a single capability bit.
+/// Used for UART debug output when denying a syscall.
+pub fn cap_name(cap: CapBits) -> &'static str {
+    match cap {
+        CAP_IPC_SEND_EP0 => "IPC_SEND_EP0",
+        CAP_IPC_RECV_EP0 => "IPC_RECV_EP0",
+        CAP_IPC_SEND_EP1 => "IPC_SEND_EP1",
+        CAP_IPC_RECV_EP1 => "IPC_RECV_EP1",
+        CAP_WRITE         => "WRITE",
+        CAP_YIELD         => "YIELD",
+        CAP_NOTIFY        => "NOTIFY",
+        CAP_WAIT_NOTIFY   => "WAIT_NOTIFY",
+        CAP_IPC_SEND_EP2  => "IPC_SEND_EP2",
+        CAP_IPC_RECV_EP2  => "IPC_RECV_EP2",
+        CAP_IPC_SEND_EP3  => "IPC_SEND_EP3",
+        CAP_IPC_RECV_EP3  => "IPC_RECV_EP3",
+        CAP_GRANT_CREATE  => "GRANT_CREATE",
+        CAP_GRANT_REVOKE  => "GRANT_REVOKE",
+        CAP_IRQ_BIND      => "IRQ_BIND",
+        CAP_IRQ_ACK       => "IRQ_ACK",
+        CAP_DEVICE_MAP    => "DEVICE_MAP",
+        CAP_ALL           => "ALL",
+        CAP_NONE          => "NONE",
+        _                 => "UNKNOWN",
+    }
+}
 
 ```
 
@@ -607,11 +808,7 @@ pub extern "C" fn exception_dispatch_irq(frame: &mut TrapFrame) {
 
     match intid {
         crate::timer::TIMER_INTID => crate::timer::tick_handler(frame),
-        _ => {
-            uart_print("!!! IRQ INTID=");
-            uart_print_hex(intid as u64);
-            uart_print(" (unhandled) !!!\n");
-        }
+        _ => crate::irq::irq_route(intid, frame),
     }
 
     crate::gic::end_interrupt(intid);
@@ -631,6 +828,23 @@ pub extern "C" fn exception_dispatch_serror(_frame: &mut TrapFrame) {
 #[cfg(target_arch = "aarch64")]
 fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
     let syscall_nr = frame.x[7];
+    let ep_id = frame.x[6];
+
+    // ─── Phase G: Capability check ─────────────────────────────────
+    let required = crate::cap::cap_for_syscall(syscall_nr, ep_id);
+    let task_caps = unsafe { crate::sched::TCBS[crate::sched::CURRENT].caps };
+
+    if !crate::cap::cap_check(task_caps, required) {
+        uart_print("!!! CAP DENIED: task ");
+        uart_print_hex(unsafe { crate::sched::CURRENT } as u64);
+        uart_print(" syscall #");
+        uart_print_hex(syscall_nr);
+        uart_print(" needs ");
+        uart_print(crate::cap::cap_name(required));
+        uart_print(" — faulting\n");
+        crate::sched::fault_current_task(frame);
+        return;
+    }
 
     match syscall_nr {
         // SYS_YIELD = 0: voluntarily yield CPU
@@ -643,6 +857,20 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
         3 => crate::ipc::sys_call(frame, frame.x[6] as usize),
         // SYS_WRITE = 4: write buffer to UART (x0=buf, x1=len)
         4 => handle_sys_write(frame),
+        // SYS_NOTIFY = 5: send notification to target (x6=target_id, x0=bitmask)
+        5 => handle_notify(frame),
+        // SYS_WAIT_NOTIFY = 6: wait for notification (returns pending bits in x0)
+        6 => handle_wait_notify(frame),
+        // SYS_GRANT_CREATE = 7: create shared memory grant (x0=grant_id, x6=peer_task_id)
+        7 => handle_grant_create(frame),
+        // SYS_GRANT_REVOKE = 8: revoke shared memory grant (x0=grant_id)
+        8 => handle_grant_revoke(frame),
+        // SYS_IRQ_BIND = 9: bind IRQ to notification (x0=intid, x1=notify_bit)
+        9 => handle_irq_bind(frame),
+        // SYS_IRQ_ACK = 10: acknowledge IRQ handled (x0=intid)
+        10 => handle_irq_ack(frame),
+        // SYS_DEVICE_MAP = 11: map device MMIO into user-space (x0=device_id)
+        11 => handle_device_map(frame),
         _ => {
             uart_print("!!! unknown syscall #");
             uart_print_hex(syscall_nr);
@@ -673,6 +901,125 @@ fn handle_sys_write(frame: &TrapFrame) {
         let byte = unsafe { core::ptr::read_volatile((buf_ptr + i) as *const u8) };
         crate::uart_write(byte);
     }
+}
+
+/// SYS_NOTIFY handler: send async notification bits to a target task.
+/// x6 = target task ID, x0 = notification bitmask.
+/// OR-merges bits into target's notify_pending. If target is blocked
+/// in wait_notify, unblock it immediately.
+#[cfg(target_arch = "aarch64")]
+fn handle_notify(frame: &mut TrapFrame) {
+    let target_id = frame.x[6] as usize;
+    let bits = frame.x[0];
+
+    if target_id >= crate::sched::NUM_TASKS {
+        uart_print("!!! SYS_NOTIFY: invalid target\n");
+        frame.x[0] = 0xFFFF_DEAD;
+        return;
+    }
+
+    if bits == 0 {
+        return; // no-op
+    }
+
+    unsafe {
+        // OR-merge notification bits into target's pending mask
+        crate::sched::TCBS[target_id].notify_pending |= bits;
+
+        // If the target is blocked waiting for notifications, unblock it
+        if crate::sched::TCBS[target_id].notify_waiting {
+            crate::sched::TCBS[target_id].notify_waiting = false;
+
+            // Deliver pending bits into the target's x0 and clear
+            let pending = crate::sched::TCBS[target_id].notify_pending;
+            crate::sched::TCBS[target_id].notify_pending = 0;
+            crate::sched::set_task_reg(target_id, 0, pending);
+
+            crate::sched::set_task_state(target_id, crate::sched::TaskState::Ready);
+        }
+    }
+}
+
+/// SYS_WAIT_NOTIFY handler: wait for notification bits.
+/// If caller has pending bits: return immediately in x0 and clear.
+/// Otherwise: block caller, set notify_waiting=true, schedule away.
+#[cfg(target_arch = "aarch64")]
+fn handle_wait_notify(frame: &mut TrapFrame) {
+    unsafe {
+        let current = crate::sched::CURRENT;
+
+        let pending = crate::sched::TCBS[current].notify_pending;
+        if pending != 0 {
+            // Notifications already pending — deliver immediately
+            frame.x[0] = pending;
+            crate::sched::TCBS[current].notify_pending = 0;
+        } else {
+            // No pending notifications — block and wait
+            crate::sched::save_frame(current, frame);
+            crate::sched::TCBS[current].notify_waiting = true;
+            crate::sched::set_task_state(current, crate::sched::TaskState::Blocked);
+            crate::sched::schedule(frame);
+        }
+    }
+}
+
+/// SYS_GRANT_CREATE handler: create shared memory grant.
+/// x0 = grant_id, x6 = peer_task_id.
+/// Returns result in x0 (0 = success, else error code).
+#[cfg(target_arch = "aarch64")]
+fn handle_grant_create(frame: &mut TrapFrame) {
+    let grant_id = frame.x[0] as usize;
+    let peer_id = frame.x[6] as usize;
+    let current = unsafe { crate::sched::CURRENT };
+
+    let result = crate::grant::grant_create(grant_id, current, peer_id);
+    frame.x[0] = result;
+}
+
+/// SYS_GRANT_REVOKE handler: revoke shared memory grant.
+/// x0 = grant_id.
+/// Returns result in x0 (0 = success, else error code).
+#[cfg(target_arch = "aarch64")]
+fn handle_grant_revoke(frame: &mut TrapFrame) {
+    let grant_id = frame.x[0] as usize;
+    let current = unsafe { crate::sched::CURRENT };
+
+    let result = crate::grant::grant_revoke(grant_id, current);
+    frame.x[0] = result;
+}
+
+/// SYS_IRQ_BIND handler: bind IRQ INTID to notification bit.
+/// x0 = intid, x1 = notify_bit.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+fn handle_irq_bind(frame: &mut TrapFrame) {
+    let intid = frame.x[0] as u32;
+    let notify_bit = frame.x[1];
+    let current = unsafe { crate::sched::CURRENT };
+    let result = crate::irq::irq_bind(intid, current, notify_bit);
+    frame.x[0] = result;
+}
+
+/// SYS_IRQ_ACK handler: acknowledge IRQ handled, unmask INTID.
+/// x0 = intid.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+fn handle_irq_ack(frame: &mut TrapFrame) {
+    let intid = frame.x[0] as u32;
+    let current = unsafe { crate::sched::CURRENT };
+    let result = crate::irq::irq_ack(intid, current);
+    frame.x[0] = result;
+}
+
+/// SYS_DEVICE_MAP handler: map device MMIO into user-space.
+/// x0 = device_id (0 = UART0).
+/// Returns result in x0 (0 = success, else error code).
+#[cfg(target_arch = "aarch64")]
+fn handle_device_map(frame: &mut TrapFrame) {
+    let device_id = frame.x[0];
+    let current = unsafe { crate::sched::CURRENT };
+    let result = unsafe { crate::mmu::map_device_for_task(device_id, current) };
+    frame.x[0] = result;
 }
 
 /// Instruction Abort handler — fault task if from lower EL, halt if from same EL
@@ -904,6 +1251,7 @@ const GICC_BASE: usize = 0x0801_0000;
 
 const GICD_CTLR: usize = 0x000;
 const GICD_ISENABLER: usize = 0x100; // Set-enable (1 bit per INTID, registers of 32 bits)
+const GICD_ICENABLER: usize = 0x180; // Clear-enable (write-1-to-disable, 1 bit per INTID)
 const GICD_IPRIORITYR: usize = 0x400; // Priority (1 byte per INTID)
 
 // ─── GICC register offsets ─────────────────────────────────────────
@@ -968,6 +1316,15 @@ pub fn enable_intid(intid: u32) {
     gicd_write(offset, val | bit);
 }
 
+/// Disable (mask) a specific interrupt ID.
+/// GICD_ICENABLER uses write-1-to-clear semantics — no read-modify-write needed.
+pub fn disable_intid(intid: u32) {
+    let reg_index = (intid / 32) as usize;
+    let bit = 1u32 << (intid % 32);
+    let offset = GICD_ICENABLER + reg_index * 4;
+    gicd_write(offset, bit);
+}
+
 /// Set priority for a specific INTID (0 = highest, 0xFF = lowest)
 pub fn set_priority(intid: u32, priority: u8) {
     // GICD_IPRIORITYR: 1 byte per INTID
@@ -987,6 +1344,232 @@ pub fn end_interrupt(intid: u32) {
 
 /// Spurious INTID constant
 pub const INTID_SPURIOUS: u32 = 1023;
+
+```
+
+## File ./src\grant.rs:
+```rust
+/// AegisOS Shared Memory Grant Module
+///
+/// Allows two tasks to share a specific physical memory page under
+/// kernel-controlled access. The owner creates a grant, mapping the
+/// page into both tasks' L3 page tables as AP_RW_EL0. Revoking
+/// unmaps the peer's access (sets entry back to AP_RW_EL1).
+///
+/// Grant pages are statically allocated in the `.grant_pages` linker
+/// section — no heap, no dynamic allocation.
+///
+/// Syscalls:
+///   SYS_GRANT_CREATE = 7: owner grants a page to a peer task
+///   SYS_GRANT_REVOKE = 8: owner revokes peer's access
+
+use crate::sched;
+use crate::uart_print;
+
+// ─── Constants ─────────────────────────────────────────────────────
+
+/// Maximum number of grant pages (statically allocated in linker.ld)
+pub const MAX_GRANTS: usize = 2;
+
+/// Grant page size (must match linker.ld allocation)
+pub const GRANT_PAGE_SIZE: usize = 4096;
+
+// ─── Grant struct ──────────────────────────────────────────────────
+
+/// A shared memory grant — tracks who owns and shares a page.
+#[derive(Clone, Copy)]
+pub struct Grant {
+    /// Task that created the grant (None = slot unused)
+    pub owner: Option<usize>,
+    /// Task that was granted access (None = not shared)
+    pub peer: Option<usize>,
+    /// Physical address of the grant page
+    pub phys_addr: u64,
+    /// Whether this grant is currently active
+    pub active: bool,
+}
+
+pub const EMPTY_GRANT: Grant = Grant {
+    owner: None,
+    peer: None,
+    phys_addr: 0,
+    active: false,
+};
+
+// ─── Static grant table ────────────────────────────────────────────
+
+pub static mut GRANTS: [Grant; MAX_GRANTS] = [EMPTY_GRANT; MAX_GRANTS];
+
+// ─── Grant page addresses (from linker) ────────────────────────────
+
+/// Get the physical address of grant page `grant_id`.
+/// Returns None if grant_id is out of range.
+#[cfg(target_arch = "aarch64")]
+pub fn grant_page_addr(grant_id: usize) -> Option<u64> {
+    if grant_id >= MAX_GRANTS {
+        return None;
+    }
+    extern "C" {
+        static __grant_pages_start: u8;
+    }
+    let base = unsafe { &__grant_pages_start as *const u8 as u64 };
+    Some(base + (grant_id as u64) * GRANT_PAGE_SIZE as u64)
+}
+
+/// Host-test stub: return a fake but distinct address per grant.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn grant_page_addr(grant_id: usize) -> Option<u64> {
+    if grant_id >= MAX_GRANTS {
+        return None;
+    }
+    // Fake addresses within the first 2MiB (L3 range) for test purposes
+    Some(0x4010_0000_u64 + (grant_id as u64) * GRANT_PAGE_SIZE as u64)
+}
+
+// ─── Core operations ───────────────────────────────────────────────
+
+/// Create a shared memory grant.
+/// `grant_id`: which grant page (0..MAX_GRANTS)
+/// `owner`: task creating the grant (current task)
+/// `peer`: task receiving shared access
+///
+/// Returns 0 on success, error code on failure:
+///   0xFFFF_0001 = invalid grant_id
+///   0xFFFF_0002 = grant already active
+///   0xFFFF_0003 = invalid peer
+///   0xFFFF_0004 = owner == peer
+pub fn grant_create(grant_id: usize, owner: usize, peer: usize) -> u64 {
+    if grant_id >= MAX_GRANTS {
+        uart_print("!!! GRANT: invalid grant_id\n");
+        return 0xFFFF_0001;
+    }
+
+    unsafe {
+        if GRANTS[grant_id].active {
+            uart_print("!!! GRANT: already active\n");
+            return 0xFFFF_0002;
+        }
+
+        if peer >= sched::NUM_TASKS {
+            uart_print("!!! GRANT: invalid peer\n");
+            return 0xFFFF_0003;
+        }
+
+        if owner == peer {
+            uart_print("!!! GRANT: owner == peer\n");
+            return 0xFFFF_0004;
+        }
+
+        let phys = match grant_page_addr(grant_id) {
+            Some(addr) => addr,
+            None => return 0xFFFF_0001,
+        };
+
+        // Map grant page into both tasks' L3 page tables
+        #[cfg(target_arch = "aarch64")]
+        {
+            crate::mmu::map_grant_for_task(phys, owner);
+            crate::mmu::map_grant_for_task(phys, peer);
+        }
+
+        GRANTS[grant_id] = Grant {
+            owner: Some(owner),
+            peer: Some(peer),
+            phys_addr: phys,
+            active: true,
+        };
+
+        uart_print("[AegisOS] GRANT: task ");
+        crate::uart_print_hex(owner as u64);
+        uart_print(" -> task ");
+        crate::uart_print_hex(peer as u64);
+        uart_print(" (grant ");
+        crate::uart_print_hex(grant_id as u64);
+        uart_print(")\n");
+    }
+
+    0 // success
+}
+
+/// Revoke a shared memory grant.
+/// `grant_id`: which grant to revoke
+/// `caller`: task requesting revoke (must be owner)
+///
+/// Returns 0 on success, error code on failure.
+pub fn grant_revoke(grant_id: usize, caller: usize) -> u64 {
+    if grant_id >= MAX_GRANTS {
+        uart_print("!!! GRANT: invalid grant_id\n");
+        return 0xFFFF_0001;
+    }
+
+    unsafe {
+        if !GRANTS[grant_id].active {
+            return 0; // no-op: already inactive
+        }
+
+        if GRANTS[grant_id].owner != Some(caller) {
+            uart_print("!!! GRANT: caller is not owner\n");
+            return 0xFFFF_0005;
+        }
+
+        // Unmap from peer's page table
+        if let Some(peer) = GRANTS[grant_id].peer {
+            #[cfg(target_arch = "aarch64")]
+            {
+                crate::mmu::unmap_grant_for_task(GRANTS[grant_id].phys_addr, peer);
+            }
+        }
+
+        GRANTS[grant_id].active = false;
+        GRANTS[grant_id].peer = None;
+
+        uart_print("[AegisOS] GRANT REVOKED: grant ");
+        crate::uart_print_hex(grant_id as u64);
+        uart_print("\n");
+    }
+
+    0 // success
+}
+
+// ─── Fault cleanup ─────────────────────────────────────────────────
+
+/// Clean up all grants involving a faulted task.
+/// If the task is owner: revoke grant (unmap peer).
+/// If the task is peer: unmap peer's access.
+/// Called from sched::fault_current_task() and sched::restart_task().
+pub fn cleanup_task(task_idx: usize) {
+    unsafe {
+        for i in 0..MAX_GRANTS {
+            if !GRANTS[i].active {
+                continue;
+            }
+
+            if GRANTS[i].owner == Some(task_idx) {
+                // Task is owner — unmap peer and deactivate
+                if let Some(peer) = GRANTS[i].peer {
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        crate::mmu::unmap_grant_for_task(GRANTS[i].phys_addr, peer);
+                    }
+                }
+                // Also unmap from owner (faulted task gets fresh state on restart)
+                #[cfg(target_arch = "aarch64")]
+                {
+                    crate::mmu::unmap_grant_for_task(GRANTS[i].phys_addr, task_idx);
+                }
+                GRANTS[i] = EMPTY_GRANT;
+            } else if GRANTS[i].peer == Some(task_idx) {
+                // Task is peer — unmap peer's access, keep owner's grant active but no peer
+                #[cfg(target_arch = "aarch64")]
+                {
+                    crate::mmu::unmap_grant_for_task(GRANTS[i].phys_addr, task_idx);
+                }
+                GRANTS[i].peer = None;
+                GRANTS[i].active = false;
+            }
+        }
+    }
+}
 
 ```
 
@@ -1015,22 +1598,81 @@ pub const SYS_RECV: u64 = 2;
 #[allow(dead_code)]
 pub const SYS_CALL: u64 = 3;
 
-pub const MAX_ENDPOINTS: usize = 2;
+pub const MAX_ENDPOINTS: usize = 4;
 pub const MSG_REGS: usize = 4; // x[0]..x[3]
+pub const MAX_WAITERS: usize = 4; // max senders queued per endpoint
 
 // ─── Endpoint ──────────────────────────────────────────────────────
 
-/// An IPC endpoint. One task can be waiting to send, one to receive.
-/// For simplicity: single-slot (one waiter per direction).
+/// Circular queue for sender waiters on an endpoint.
+pub struct SenderQueue {
+    pub tasks: [usize; MAX_WAITERS],
+    pub head: usize, // index of next task to dequeue
+    pub count: usize, // number of tasks in queue
+}
+
+impl SenderQueue {
+    pub const fn new() -> Self {
+        SenderQueue { tasks: [0; MAX_WAITERS], head: 0, count: 0 }
+    }
+
+    /// Push a task index. Returns false if queue is full.
+    pub fn push(&mut self, task: usize) -> bool {
+        if self.count >= MAX_WAITERS { return false; }
+        let tail = (self.head + self.count) % MAX_WAITERS;
+        self.tasks[tail] = task;
+        self.count += 1;
+        true
+    }
+
+    /// Pop the next sender. Returns None if empty.
+    pub fn pop(&mut self) -> Option<usize> {
+        if self.count == 0 { return None; }
+        let task = self.tasks[self.head];
+        self.head = (self.head + 1) % MAX_WAITERS;
+        self.count -= 1;
+        Some(task)
+    }
+
+    /// Remove a specific task from the queue (for cleanup).
+    pub fn remove(&mut self, task: usize) {
+        // Rebuild queue without the target task
+        let old_count = self.count;
+        let old_head = self.head;
+        let mut new_tasks = [0usize; MAX_WAITERS];
+        let mut new_count = 0usize;
+        for i in 0..old_count {
+            let idx = (old_head + i) % MAX_WAITERS;
+            if self.tasks[idx] != task {
+                new_tasks[new_count] = self.tasks[idx];
+                new_count += 1;
+            }
+        }
+        self.tasks = new_tasks;
+        self.head = 0;
+        self.count = new_count;
+    }
+
+    /// Check if a task is in the queue.
+    pub fn contains(&self, task: usize) -> bool {
+        for i in 0..self.count {
+            let idx = (self.head + i) % MAX_WAITERS;
+            if self.tasks[idx] == task { return true; }
+        }
+        false
+    }
+}
+
+/// An IPC endpoint. Multiple senders can queue, one receiver waits.
 pub struct Endpoint {
-    /// Task blocked waiting to send on this endpoint (None = no waiter)
-    pub sender: Option<usize>,
+    /// Circular queue of tasks blocked waiting to send on this endpoint
+    pub sender_queue: SenderQueue,
     /// Task blocked waiting to receive on this endpoint (None = no waiter)
     pub receiver: Option<usize>,
 }
 
 pub const EMPTY_EP: Endpoint = Endpoint {
-    sender: None,
+    sender_queue: SenderQueue { tasks: [0; MAX_WAITERS], head: 0, count: 0 },
     receiver: None,
 };
 
@@ -1063,8 +1705,11 @@ pub fn sys_send(frame: &mut TrapFrame, ep_id: usize) {
 
             // Sender continues (not blocked)
         } else {
-            // No receiver — block sender and wait
-            ENDPOINTS[ep_id].sender = Some(current);
+            // No receiver — enqueue sender and block
+            if !ENDPOINTS[ep_id].sender_queue.push(current) {
+                uart_print("!!! IPC: sender queue full\n");
+                return;
+            }
             sched::set_task_state(current, TaskState::Blocked);
             sched::schedule(frame);
         }
@@ -1086,7 +1731,7 @@ pub fn sys_recv(frame: &mut TrapFrame, ep_id: usize) {
         // Save current frame to TCB
         sched::save_frame(current, frame);
 
-        if let Some(send_task) = ENDPOINTS[ep_id].sender.take() {
+        if let Some(send_task) = ENDPOINTS[ep_id].sender_queue.pop() {
             // Sender is waiting — receive message directly
             copy_message(send_task, current);
 
@@ -1128,8 +1773,11 @@ pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
             sched::set_task_state(current, TaskState::Blocked);
             sched::schedule(frame);
         } else {
-            // No receiver — block as sender, will also need reply
-            ENDPOINTS[ep_id].sender = Some(current);
+            // No receiver — enqueue as sender, will also need reply
+            if !ENDPOINTS[ep_id].sender_queue.push(current) {
+                uart_print("!!! IPC: sender queue full\n");
+                return;
+            }
             sched::set_task_state(current, TaskState::Blocked);
             sched::schedule(frame);
         }
@@ -1154,24 +1802,303 @@ pub unsafe fn copy_message(from_task: usize, to_task: usize) {
 pub fn cleanup_task(task_idx: usize) {
     unsafe {
         for i in 0..MAX_ENDPOINTS {
-            // If the faulted task was a pending sender, clear the slot
-            if ENDPOINTS[i].sender == Some(task_idx) {
-                ENDPOINTS[i].sender = None;
-            }
+            // If the faulted task was a pending sender, remove from queue
+            ENDPOINTS[i].sender_queue.remove(task_idx);
 
             // If the faulted task was a pending receiver, clear the slot
             if ENDPOINTS[i].receiver == Some(task_idx) {
                 ENDPOINTS[i].receiver = None;
             }
         }
+    }
+}
 
-        // Also check: is any other task Blocked because it was waiting
-        // for a rendezvous with the faulted task? In synchronous IPC,
-        // a task blocks *on an endpoint*, not on a specific partner.
-        // So if partner is blocked on ep.sender/receiver, it stays blocked
-        // until another task does the complementary operation.
-        // This is correct for synchronous IPC — partner will be unblocked
-        // when the faulted task restarts and re-enters IPC.
+```
+
+## File ./src\irq.rs:
+```rust
+/// AegisOS IRQ Routing Module
+///
+/// Routes hardware interrupts (SPIs, INTID ≥ 32) to user tasks via
+/// the notification system. A task registers interest in an INTID
+/// by calling SYS_IRQ_BIND; the kernel masks/unmasks the interrupt
+/// and delivers a notification bit when it fires.
+///
+/// Flow:
+///   1. Task → SYS_IRQ_BIND(intid, notify_bit) → kernel enables INTID
+///   2. HW IRQ fires → irq_route() → notify task, mask INTID
+///   3. Task handles device → SYS_IRQ_ACK(intid) → kernel unmasks INTID
+///
+/// Syscalls:
+///   SYS_IRQ_BIND = 9:  register to receive IRQ as notification
+///   SYS_IRQ_ACK  = 10: acknowledge IRQ handled, re-enable INTID
+
+use crate::sched;
+use crate::uart_print;
+
+// ─── Constants ─────────────────────────────────────────────────────
+
+/// Maximum number of IRQ bindings (SPI slots)
+pub const MAX_IRQ_BINDINGS: usize = 8;
+
+/// Minimum INTID for user-bindable interrupts (SPIs start at 32)
+pub const MIN_SPI_INTID: u32 = 32;
+
+// ─── Error codes ───────────────────────────────────────────────────
+
+pub const ERR_INVALID_INTID: u64 = 0xFFFF_1001;
+pub const ERR_ALREADY_BOUND: u64 = 0xFFFF_1002;
+pub const ERR_TABLE_FULL: u64 = 0xFFFF_1003;
+pub const ERR_NOT_BOUND: u64 = 0xFFFF_1004;
+pub const ERR_NOT_OWNER: u64 = 0xFFFF_1005;
+
+// ─── IrqBinding struct ────────────────────────────────────────────
+
+/// An IRQ-to-task binding — routes a hardware INTID to a notification.
+#[derive(Clone, Copy)]
+pub struct IrqBinding {
+    /// Hardware interrupt ID (SPI, ≥ 32)
+    pub intid: u32,
+    /// Task receiving notifications when this IRQ fires
+    pub task_id: usize,
+    /// Which bit to OR into notify_pending
+    pub notify_bit: u64,
+    /// Whether this binding slot is in use
+    pub active: bool,
+    /// IRQ fired but task hasn't ACK'd yet (INTID masked)
+    pub pending_ack: bool,
+}
+
+pub const EMPTY_BINDING: IrqBinding = IrqBinding {
+    intid: 0,
+    task_id: 0,
+    notify_bit: 0,
+    active: false,
+    pending_ack: false,
+};
+
+// ─── Static binding table ──────────────────────────────────────────
+
+pub static mut IRQ_BINDINGS: [IrqBinding; MAX_IRQ_BINDINGS] =
+    [EMPTY_BINDING; MAX_IRQ_BINDINGS];
+
+// ─── Core operations ───────────────────────────────────────────────
+
+/// Bind an IRQ (INTID) to a task's notification system.
+///
+/// Validates:
+///   - INTID ≥ 32 (SPIs only; PPIs/SGIs are kernel-reserved)
+///   - Not already bound by another task
+///   - Table not full
+///
+/// On success: enables INTID in GIC, returns 0.
+pub fn irq_bind(intid: u32, task_id: usize, notify_bit: u64) -> u64 {
+    // Reject PPIs/SGIs (INTID < 32), including timer (INTID 30)
+    if intid < MIN_SPI_INTID {
+        uart_print("!!! IRQ: invalid INTID (< 32)\n");
+        return ERR_INVALID_INTID;
+    }
+
+    // notify_bit must have exactly one bit set (or at least be non-zero)
+    if notify_bit == 0 {
+        uart_print("!!! IRQ: notify_bit is zero\n");
+        return ERR_INVALID_INTID;
+    }
+
+    unsafe {
+        // Check for duplicate: same INTID already bound
+        for i in 0..MAX_IRQ_BINDINGS {
+            if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].intid == intid {
+                uart_print("!!! IRQ: INTID already bound\n");
+                return ERR_ALREADY_BOUND;
+            }
+        }
+
+        // Find empty slot
+        let mut slot: Option<usize> = None;
+        for i in 0..MAX_IRQ_BINDINGS {
+            if !IRQ_BINDINGS[i].active {
+                slot = Some(i);
+                break;
+            }
+        }
+
+        let idx = match slot {
+            Some(i) => i,
+            None => {
+                uart_print("!!! IRQ: binding table full\n");
+                return ERR_TABLE_FULL;
+            }
+        };
+
+        IRQ_BINDINGS[idx] = IrqBinding {
+            intid,
+            task_id,
+            notify_bit,
+            active: true,
+            pending_ack: false,
+        };
+
+        // Enable this INTID in the GIC
+        #[cfg(target_arch = "aarch64")]
+        {
+            crate::gic::enable_intid(intid);
+        }
+
+        uart_print("[AegisOS] IRQ BIND: INTID ");
+        crate::uart_print_hex(intid as u64);
+        uart_print(" -> task ");
+        crate::uart_print_hex(task_id as u64);
+        uart_print(", bit ");
+        crate::uart_print_hex(notify_bit);
+        uart_print("\n");
+    }
+
+    0 // success
+}
+
+/// Acknowledge an IRQ, allowing the kernel to unmask it.
+///
+/// The task must be the one that received the notification.
+/// Clears pending_ack and re-enables the INTID in the GIC.
+pub fn irq_ack(intid: u32, task_id: usize) -> u64 {
+    unsafe {
+        for i in 0..MAX_IRQ_BINDINGS {
+            if IRQ_BINDINGS[i].active
+                && IRQ_BINDINGS[i].intid == intid
+            {
+                if IRQ_BINDINGS[i].task_id != task_id {
+                    uart_print("!!! IRQ ACK: not the bound task\n");
+                    return ERR_NOT_OWNER;
+                }
+
+                if !IRQ_BINDINGS[i].pending_ack {
+                    // Already ACK'd or never fired — no-op
+                    return 0;
+                }
+
+                IRQ_BINDINGS[i].pending_ack = false;
+
+                // Re-enable (unmask) the INTID in GIC
+                #[cfg(target_arch = "aarch64")]
+                {
+                    crate::gic::enable_intid(intid);
+                }
+
+                return 0;
+            }
+        }
+    }
+
+    // No binding found for this INTID
+    ERR_NOT_BOUND
+}
+
+/// Route a hardware IRQ to the bound task (called from exception handler).
+///
+/// Looks up the INTID in the binding table. If bound:
+///   - OR notify_bit into task's notify_pending
+///   - If task is waiting on notifications → unblock it
+///   - Set pending_ack = true
+///   - Mask the INTID until task calls SYS_IRQ_ACK
+///
+/// If not bound, prints a warning and ignores.
+#[cfg(target_arch = "aarch64")]
+pub fn irq_route(intid: u32, _frame: &mut crate::exception::TrapFrame) {
+    unsafe {
+        for i in 0..MAX_IRQ_BINDINGS {
+            if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].intid == intid {
+                let tid = IRQ_BINDINGS[i].task_id;
+                let bit = IRQ_BINDINGS[i].notify_bit;
+
+                // OR notification bit into task's pending mask
+                sched::TCBS[tid].notify_pending |= bit;
+
+                // If task is waiting for notifications, unblock it
+                if sched::TCBS[tid].notify_waiting {
+                    sched::TCBS[tid].notify_waiting = false;
+                    sched::TCBS[tid].state = sched::TaskState::Ready;
+                    // Deliver pending bits into x0
+                    let pending = sched::TCBS[tid].notify_pending;
+                    sched::TCBS[tid].context.x[0] = pending;
+                    sched::TCBS[tid].notify_pending = 0;
+                }
+
+                // Mark pending ACK — INTID stays masked until task ACKs
+                IRQ_BINDINGS[i].pending_ack = true;
+
+                // Mask this INTID until ACK
+                crate::gic::disable_intid(intid);
+
+                return;
+            }
+        }
+
+        // No binding found — log and ignore
+        uart_print("!!! IRQ INTID=");
+        crate::uart_print_hex(intid as u64);
+        uart_print(" (unbound, ignored)\n");
+    }
+}
+
+/// Stub for host tests — irq_route requires TrapFrame which is AArch64-only.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn irq_route_test(intid: u32, task_id: usize) {
+    unsafe {
+        for i in 0..MAX_IRQ_BINDINGS {
+            if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].intid == intid {
+                let tid = IRQ_BINDINGS[i].task_id;
+                let bit = IRQ_BINDINGS[i].notify_bit;
+
+                sched::TCBS[tid].notify_pending |= bit;
+
+                if sched::TCBS[tid].notify_waiting {
+                    sched::TCBS[tid].notify_waiting = false;
+                    sched::TCBS[tid].state = sched::TaskState::Ready;
+                    let pending = sched::TCBS[tid].notify_pending;
+                    sched::TCBS[tid].context.x[0] = pending;
+                    sched::TCBS[tid].notify_pending = 0;
+                }
+
+                IRQ_BINDINGS[i].pending_ack = true;
+                // No GIC on host
+                return;
+            }
+        }
+    }
+}
+
+// ─── Fault cleanup ─────────────────────────────────────────────────
+
+/// Clean up all IRQ bindings for a faulted/restarted task.
+/// If binding has pending_ack, re-enable the INTID (unmask orphaned IRQ).
+pub fn irq_cleanup_task(task_id: usize) {
+    unsafe {
+        for i in 0..MAX_IRQ_BINDINGS {
+            if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].task_id == task_id {
+                // If IRQ was masked waiting for ACK, unmask it
+                if IRQ_BINDINGS[i].pending_ack {
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        crate::gic::enable_intid(IRQ_BINDINGS[i].intid);
+                    }
+                }
+
+                uart_print("[AegisOS] IRQ cleanup: unbind INTID ");
+                crate::uart_print_hex(IRQ_BINDINGS[i].intid as u64);
+                uart_print(" from task ");
+                crate::uart_print_hex(task_id as u64);
+                uart_print("\n");
+
+                // Disable the INTID since no one is listening
+                #[cfg(target_arch = "aarch64")]
+                {
+                    crate::gic::disable_intid(IRQ_BINDINGS[i].intid);
+                }
+
+                IRQ_BINDINGS[i] = EMPTY_BINDING;
+            }
+        }
     }
 }
 
@@ -1189,12 +2116,15 @@ pub fn cleanup_task(task_idx: usize) {
 
 #![no_std]
 
+pub mod cap;
 pub mod uart;
 pub mod mmu;
 pub mod exception;
 pub mod sched;
 pub mod ipc;
 pub mod timer;
+pub mod grant;
+pub mod irq;
 
 #[cfg(target_arch = "aarch64")]
 pub mod gic;
@@ -1286,6 +2216,25 @@ pub fn syscall_recv(ep_id: u64) -> u64 {
     msg0
 }
 
+/// SYS_RECV variant returning first two message registers (x0, x1).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_recv2(ep_id: u64) -> (u64, u64) {
+    let msg0: u64;
+    let msg1: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x6") ep_id,
+            in("x7") 2u64, // SYS_RECV
+            lateout("x0") msg0,
+            lateout("x1") msg1,
+            options(nomem, nostack)
+        );
+    }
+    (msg0, msg1)
+}
+
 /// SYS_CALL (syscall #3): send message then wait for reply.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
@@ -1329,26 +2278,201 @@ pub fn user_print(s: &str) {
     syscall_write(s.as_ptr(), s.len());
 }
 
-// ─── Task entry points ─────────────────────────────────────────────
-
-/// Task A (client): send "PING" on EP 0, receive reply
+/// SYS_NOTIFY (syscall #5): send notification bitmask to target task.
 #[cfg(target_arch = "aarch64")]
-#[no_mangle]
-pub extern "C" fn task_a_entry() -> ! {
-    loop {
-        user_print("A:PING ");
-        syscall_call(0, 0x50494E47, 0, 0, 0);
+#[inline(always)]
+pub fn syscall_notify(target_id: u64, bits: u64) {
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") bits,
+            in("x6") target_id,
+            in("x7") 5u64, // SYS_NOTIFY
+            options(nomem, nostack)
+        );
     }
 }
 
-/// Task B (server): receive on EP 0, send PONG reply
+/// SYS_WAIT_NOTIFY (syscall #6): block until notification arrives.
+/// Returns the pending bitmask in x0.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_wait_notify() -> u64 {
+    let bits: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x7") 6u64, // SYS_WAIT_NOTIFY
+            lateout("x0") bits,
+            options(nomem, nostack)
+        );
+    }
+    bits
+}
+/// SYS_GRANT_CREATE (syscall #7): create shared memory grant.
+/// x0 = grant_id, x6 = peer_task_id.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_grant_create(grant_id: u64, peer_task_id: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") grant_id,
+            in("x6") peer_task_id,
+            in("x7") 7u64, // SYS_GRANT_CREATE
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+
+/// SYS_GRANT_REVOKE (syscall #8): revoke shared memory grant.
+/// x0 = grant_id.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_grant_revoke(grant_id: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") grant_id,
+            in("x7") 8u64, // SYS_GRANT_REVOKE
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+/// SYS_IRQ_BIND (syscall #9): bind an IRQ INTID to a notification bit.
+/// x0 = intid (must be ≥ 32, SPIs only), x1 = notify_bit.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_irq_bind(intid: u64, notify_bit: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") intid,
+            in("x1") notify_bit,
+            in("x7") 9u64, // SYS_IRQ_BIND
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+
+/// SYS_IRQ_ACK (syscall #10): acknowledge an IRQ handled, re-enable INTID.
+/// x0 = intid.
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_irq_ack(intid: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") intid,
+            in("x7") 10u64, // SYS_IRQ_ACK
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+
+/// SYS_DEVICE_MAP (syscall #11): map device MMIO into user-space.
+/// x0 = device_id (0 = UART0).
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_device_map(device_id: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") device_id,
+            in("x7") 11u64, // SYS_DEVICE_MAP
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+
+// ─── Task entry points (Phase J4: User-Mode UART Driver PoC) ───────
+
+/// UART0 PL011 Data Register address (identity-mapped after SYS_DEVICE_MAP)
+#[cfg(target_arch = "aarch64")]
+const UART0_DR: *mut u8 = 0x0900_0000 as *mut u8;
+
+/// Task 0 — UART User-Mode Driver
+///
+/// Requests UART MMIO access from kernel, then loops serving IPC requests
+/// from client tasks. Reads data from shared grant page and writes each
+/// byte directly to UART DR — a genuine EL0 device driver.
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
-pub extern "C" fn task_b_entry() -> ! {
+pub extern "C" fn uart_driver_entry() -> ! {
+    // 1. Map UART0 MMIO into our address space (EL0 accessible)
+    syscall_device_map(0); // device_id=0 = UART0
+
+    // 2. Announce we're ready (still using SYS_WRITE for initial status)
+    user_print("DRV:ready ");
+
+    // 3. Serve client requests forever
     loop {
-        let _msg = syscall_recv(0);
-        user_print("B:PONG ");
-        syscall_send(0, 0x504F4E47, 0, 0, 0); // "PONG"
+        // Block waiting for an IPC request on EP 0
+        let (buf_addr_raw, len_raw) = syscall_recv2(0);
+
+        // msg x0 = buffer address in grant page
+        // msg x1 = byte count to write
+        let buf_addr = buf_addr_raw as *const u8;
+        let len = len_raw as usize;
+
+        // Write each byte directly to UART DR (EL0 MMIO write!)
+        for i in 0..len {
+            unsafe {
+                let byte = core::ptr::read_volatile(buf_addr.add(i));
+                core::ptr::write_volatile(UART0_DR, byte);
+            }
+        }
+
+        // Reply "OK" to unblock the client
+        syscall_send(0, 0x4F4B, 0, 0, 0); // "OK"
+    }
+}
+
+/// Task 1 — Client using UART driver via IPC + shared memory
+///
+/// Creates a shared memory grant, writes a message into the grant page,
+/// then calls the UART driver via IPC to output it. This demonstrates
+/// the full user-mode driver stack: grant + IPC + MMIO.
+#[cfg(target_arch = "aarch64")]
+#[no_mangle]
+pub extern "C" fn client_entry() -> ! {
+    // 1. Create a shared memory grant: grant 0, owner=us(task 1), peer=driver(task 0)
+    syscall_grant_create(0, 0); // grant_id=0, peer_task_id=0
+
+    // 2. Get the grant page address (identity-mapped, known at compile time)
+    let grant_addr = aegis_os::grant::grant_page_addr(0).unwrap_or(0) as *mut u8;
+
+    loop {
+        // 3. Write the message into the grant page
+        let msg = b"J4:UserDrv ";
+        unsafe {
+            for (i, &byte) in msg.iter().enumerate() {
+                core::ptr::write_volatile(grant_addr.add(i), byte);
+            }
+        }
+
+        // 4. Call the UART driver: send buffer address + length via IPC
+        syscall_call(0, grant_addr as u64, msg.len() as u64, 0, 0);
     }
 }
 
@@ -1378,14 +2502,43 @@ pub extern "C" fn kernel_main() -> ! {
     gic::enable_intid(timer::TIMER_INTID);
 
     sched::init(
-        task_a_entry as *const () as u64,
-        task_b_entry as *const () as u64,
+        uart_driver_entry as *const () as u64,
+        client_entry as *const () as u64,
         idle_entry as *const () as u64,
     );
 
+    // ─── Phase G: Assign capabilities ──────────────────────────────
+    unsafe {
+        use aegis_os::cap::*;
+        // Task 0 (UART driver): needs RECV/SEND on EP0 + WRITE + YIELD + notifications + grants + IRQ + device map
+        sched::TCBS[0].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
+            | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE
+            | CAP_IRQ_BIND | CAP_IRQ_ACK | CAP_DEVICE_MAP;
+        // Task 1 (client): needs CALL on EP0 + WRITE + YIELD + notifications + grants
+        sched::TCBS[1].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
+            | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE;
+        // Task 2 (idle): only needs YIELD (WFI loop)
+        sched::TCBS[2].caps = CAP_YIELD;
+    }
+    uart_print("[AegisOS] capabilities assigned\n");
+    uart_print("[AegisOS] notification system ready\n");
+    uart_print("[AegisOS] grant system ready\n");
+    uart_print("[AegisOS] IRQ routing ready\n");
+    uart_print("[AegisOS] device MMIO mapping ready\n");
+
+    // ─── Phase H: Assign per-task address spaces ───────────────────
+    unsafe {
+        use aegis_os::mmu;
+        // ASID = task_id + 1 (ASID 0 is reserved for kernel boot)
+        sched::TCBS[0].ttbr0 = mmu::ttbr0_for_task(0, 1);
+        sched::TCBS[1].ttbr0 = mmu::ttbr0_for_task(1, 2);
+        sched::TCBS[2].ttbr0 = mmu::ttbr0_for_task(2, 3);
+    }
+    uart_print("[AegisOS] per-task address spaces assigned\n");
+
     timer::init(10);
 
-    uart_print("[AegisOS] bootstrapping into task_a (EL0)...\n");
+    uart_print("[AegisOS] bootstrapping into uart_driver (EL0)...\n");
     sched::bootstrap();
 }
 
@@ -1465,6 +2618,10 @@ pub const XN: u64 = PXN | UXN;
 /// Device MMIO: Device-nGnRnE, RW, non-executable, AF=1
 pub const DEVICE_BLOCK: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | XN;
 
+/// Device MMIO for EL0: Device-nGnRnE, RW for EL0+EL1, non-executable, AF=1
+/// Used by map_device_for_task() to grant user-mode access to a device.
+pub const DEVICE_BLOCK_EL0: u64 = BLOCK | ATTR_DEVICE | AP_RW_EL0 | AF | XN;
+
 /// Normal RAM: Write-Back, RW, Inner Shareable, AF=1 (executable for sub-phase 1)
 pub const RAM_BLOCK: u64 = BLOCK | ATTR_NORMAL_WB | AP_RW_EL1 | SH_INNER | AF;
 
@@ -1535,6 +2692,33 @@ const SCTLR_WXN: u64 = 1 << 19;
 
 // ─── Page table storage (AArch64 only) ─────────────────────────────
 
+/// Number of page table pages (Phase J3: per-task L2_device for MMIO isolation)
+/// [0]  = L2_device task 0   [1]  = L2_device task 1   [2]  = L2_device task 2
+/// [3]  = L1 for task 0       [4]  = L1 for task 1       [5]  = L1 for task 2
+/// [6]  = L2_ram for task 0   [7]  = L2_ram for task 1   [8]  = L2_ram for task 2
+/// [9]  = L3 for task 0       [10] = L3 for task 1       [11] = L3 for task 2
+/// [12] = L2_device kernel    [13] = L1 kernel boot      [14] = L2_ram kernel boot
+/// [15] = L3 kernel boot
+pub const NUM_PAGE_TABLE_PAGES: usize = 16;
+
+// Page indices — per-task L2_device (J3)
+pub const PT_L2_DEVICE_0: usize = 0;
+pub const PT_L2_DEVICE_1: usize = 1;
+pub const PT_L2_DEVICE_2: usize = 2;
+pub const PT_L1_TASK0: usize = 3;
+pub const PT_L1_TASK1: usize = 4;
+pub const PT_L1_TASK2: usize = 5;
+pub const PT_L2_RAM_TASK0: usize = 6;
+pub const PT_L2_RAM_TASK1: usize = 7;
+pub const PT_L2_RAM_TASK2: usize = 8;
+pub const PT_L3_TASK0: usize = 9;
+pub const PT_L3_TASK1: usize = 10;
+pub const PT_L3_TASK2: usize = 11;
+pub const PT_L2_DEVICE_KERNEL: usize = 12;
+pub const PT_L1_KERNEL: usize = 13;
+pub const PT_L2_RAM_KERNEL: usize = 14;
+pub const PT_L3_KERNEL: usize = 15;
+
 // Linker-provided symbols for page table memory (in .page_tables section)
 #[cfg(target_arch = "aarch64")]
 extern "C" {
@@ -1554,6 +2738,8 @@ extern "C" {
     static __user_stacks_end: u8;
     static __task_stacks_start: u8;
     static __task_stacks_end: u8;
+    static __grant_pages_start: u8;
+    static __grant_pages_end: u8;
 }
 
 /// Get address of a linker symbol as usize
@@ -1563,7 +2749,7 @@ fn sym_addr(sym: &u8) -> usize {
     sym as *const u8 as usize
 }
 
-/// Pointer to one of the 4 page tables (each 512 × u64 = 4096 bytes)
+/// Pointer to one of the 13 page tables (each 512 × u64 = 4096 bytes)
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn table_ptr(index: usize) -> *mut u64 {
@@ -1580,53 +2766,27 @@ unsafe fn write_entry(table: *mut u64, index: usize, value: u64) {
     ptr::write_volatile(table.add(index), value);
 }
 
-// ─── Sub-phase 1: Identity map with 2 MiB blocks ──────────────────
+// ─── Phase H: Per-task page tables ─────────────────────────────────
 
-/// Initialize page tables: identity map devices + RAM with 2 MiB blocks
-///
-/// Layout:
+/// Build an L2_device table at page index `l2dev_index`.
+/// Maps device MMIO at indices 64..=72 (0x0800_0000–0x09FF_FFFF).
+/// All entries start as DEVICE_BLOCK (AP_RW_EL1, EL0 no access).
+/// map_device_for_task() later upgrades specific entries to DEVICE_BLOCK_EL0.
 #[cfg(target_arch = "aarch64")]
-///   L1[0] → L2_device (covers 0x0000_0000 – 0x3FFF_FFFF)
-///   L1[1] → L2_ram    (covers 0x4000_0000 – 0x7FFF_FFFF)
-///
-/// L2_device: map 0x0800_0000–0x09FF_FFFF as Device-nGnRnE (16 × 2MiB blocks)
-/// L2_ram:    map 0x4000_0000–0x47FF_FFFF as Normal WB (64 × 2MiB blocks = 128 MiB)
-unsafe fn init_tables_2mib() {
-    let l1 = table_ptr(0);
-    let l2_device = table_ptr(1);
-    let l2_ram = table_ptr(2);
-
-    // L1[0] → L2_device table
-    write_entry(l1, 0, (l2_device as u64) | TABLE);
-    // L1[1] → L2_ram table
-    write_entry(l1, 1, (l2_ram as u64) | TABLE);
-
-    // L2_device: map 2MiB blocks for device MMIO region
-    // L1[0] covers 0x0000_0000 – 0x3FFF_FFFF, each L2 entry = 2MiB
-    // UART0 at 0x0900_0000: L2 index = 0x0900_0000 / 0x20_0000 = 72
-    // GIC  at 0x0800_0000: L2 index = 0x0800_0000 / 0x20_0000 = 64
-    // Map indices 64..=72 to cover 0x0800_0000 – 0x09FF_FFFF
+unsafe fn build_l2_device(l2dev_index: usize) {
+    let l2_device = table_ptr(l2dev_index);
     for i in 64..=72 {
-        let pa = (i as u64) * 0x20_0000; // 2 MiB aligned physical address
+        let pa = (i as u64) * 0x20_0000;
         write_entry(l2_device, i, pa | DEVICE_BLOCK);
-    }
-
-    // L2_ram: map 128 MiB of RAM starting at 0x4000_0000
-    // 0x4000_0000 is at the start of the 1 GiB region covered by L1[1]
-    // So L2 index 0 = 0x4000_0000, index 1 = 0x4020_0000, etc.
-    for i in 0..64 {
-        let pa = 0x4000_0000_u64 + (i as u64) * 0x20_0000;
-        write_entry(l2_ram, i, pa | RAM_BLOCK);
     }
 }
 
-// ─── Sub-phase 2: Refine kernel 2MiB to 4KB pages with W^X ────────
-
-/// Replace L2_ram[0] (first 2MiB at 0x4000_0000) with L3 table for fine-grained permissions
+/// Build an L3 table for a given task.
+/// `l3_index` = page index in .page_tables for this L3.
+/// `owner_task` = which task (0,1,2) owns this table. 0xFF = kernel boot (all stacks EL1-only).
 #[cfg(target_arch = "aarch64")]
-unsafe fn refine_kernel_pages() {
-    let l2_ram = table_ptr(2);
-    let l3_kernel = table_ptr(3);
+unsafe fn build_l3(l3_index: usize, owner_task: u8) {
+    let l3 = table_ptr(l3_index);
 
     let text_start = sym_addr(&__text_start);
     let text_end = sym_addr(&__text_end);
@@ -1636,70 +2796,127 @@ unsafe fn refine_kernel_pages() {
     let kernel_end = sym_addr(&__kernel_end);
     let user_stacks_start = sym_addr(&__user_stacks_start);
     let user_stacks_end = sym_addr(&__user_stacks_end);
+    let grant_pages_start = sym_addr(&__grant_pages_start);
+    let grant_pages_end = sym_addr(&__grant_pages_end);
+    let guard_addr = sym_addr(&__stack_guard);
 
-    // Fill L3 table: 512 entries covering 0x4000_0000 – 0x401F_FFFF
     let base: usize = 0x4000_0000;
     for i in 0..512 {
         let pa = base + i * 4096;
 
-        let desc = if pa >= user_stacks_start && pa < user_stacks_end {
-            // User stacks: RW, EL0-accessible, non-executable
-            (pa as u64) | USER_DATA_PAGE
+        let desc = if pa == guard_addr {
+            // Stack guard page — always invalid
+            0
+        } else if pa >= user_stacks_start && pa < user_stacks_end {
+            // User stack page — per-task isolation
+            let stack_idx = (pa - user_stacks_start) / 4096;
+            if owner_task == 0xFF {
+                // Kernel boot table: all user stacks EL1-only
+                (pa as u64) | KERNEL_DATA_PAGE
+            } else if stack_idx == owner_task as usize {
+                // This task's own stack: EL0 RW
+                (pa as u64) | USER_DATA_PAGE
+            } else {
+                // Other task's stack: EL1-only (EL0 → Permission Fault)
+                (pa as u64) | KERNEL_DATA_PAGE
+            }
+        } else if pa >= grant_pages_start && pa < grant_pages_end {
+            // Grant pages — default EL1-only; map_grant_for_task() upgrades to EL0
+            (pa as u64) | KERNEL_DATA_PAGE
         } else if pa >= text_start && pa < text_end {
-            // Shared code (kernel + task): RO, executable by both EL1 and EL0
-            // Both PXN=0 and UXN=0 so kernel handlers and EL0 tasks can execute.
-            // AP = RO_EL0 (0b11) means both EL1 and EL0 can read.
-            // WXN is satisfied because pages are RO (not writable).
             (pa as u64) | SHARED_CODE_PAGE
         } else if pa >= rodata_start && pa < rodata_end {
-            // Read-only data: RO, non-executable
             (pa as u64) | KERNEL_RODATA_PAGE
         } else if pa >= data_start && pa < kernel_end {
-            // Data + BSS + page tables + kernel stacks: RW, non-executable
             (pa as u64) | KERNEL_DATA_PAGE
         } else if pa < text_start {
-            // Before kernel (DTB area etc): RW, non-executable
             (pa as u64) | KERNEL_DATA_PAGE
         } else {
-            // Beyond kernel end within this 2MiB: invalid
             0
         };
 
-        write_entry(l3_kernel, i, desc);
+        write_entry(l3, i, desc);
     }
-
-    // Replace L2_ram[0] with pointer to L3 table
-    write_entry(l2_ram, 0, (l3_kernel as u64) | TABLE);
 }
 
-/// Mark the stack guard page as invalid (causes Data Abort on stack overflow)
+/// Build an L2_ram table that points to a specific L3 table.
+/// `l2_index` = page index for this L2_ram, `l3_index` = page index for its L3.
 #[cfg(target_arch = "aarch64")]
-unsafe fn set_guard_page() {
-    let l3_kernel = table_ptr(3);
-    let guard_addr = sym_addr(&__stack_guard);
-    let base: usize = 0x4000_0000;
+unsafe fn build_l2_ram(l2_index: usize, l3_index: usize) {
+    let l2_ram = table_ptr(l2_index);
+    let l3 = table_ptr(l3_index);
 
-    // Find which L3 entry corresponds to the guard page
-    if guard_addr >= base && guard_addr < base + 512 * 4096 {
-        let index = (guard_addr - base) / 4096;
-        write_entry(l3_kernel, index, 0); // Invalid — Data Abort on access
+    // Entry [0] → L3 table (first 2MiB, fine-grained)
+    write_entry(l2_ram, 0, (l3 as u64) | TABLE);
+
+    // Entries [1..63] → 2MiB RAM blocks (EL1-only, same as before)
+    for i in 1..64 {
+        let pa = 0x4000_0000_u64 + (i as u64) * 0x20_0000;
+        write_entry(l2_ram, i, pa | RAM_BLOCK);
     }
+}
+
+/// Build an L1 table for a specific task (or kernel boot).
+/// `l1_index` = page index for this L1, `l2_ram_index` = page index for its L2_ram.
+/// `l2_device_index` = page index for this task's L2_device table.
+#[cfg(target_arch = "aarch64")]
+unsafe fn build_l1(l1_index: usize, l2_ram_index: usize, l2_device_index: usize) {
+    let l1 = table_ptr(l1_index);
+    let l2_device = table_ptr(l2_device_index);
+    let l2_ram = table_ptr(l2_ram_index);
+
+    write_entry(l1, 0, (l2_device as u64) | TABLE);
+    write_entry(l1, 1, (l2_ram as u64) | TABLE);
+}
+
+/// Get physical address of L1 page table for a task.
+/// Returns the base address suitable for TTBR0_EL1 (bits [47:12]).
+pub fn page_table_base(task_id: usize) -> u64 {
+    // task 0 → page 1, task 1 → page 2, task 2 → page 3
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ptr = table_ptr(PT_L1_TASK0 + task_id);
+        ptr as u64
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // Host tests: return a fake but distinct address per task
+        0x8000_0000_u64 + (task_id as u64) * 0x1_0000
+    }
+}
+
+/// Get the TTBR0_EL1 value for a task: (ASID << 48) | page_table_base.
+pub fn ttbr0_for_task(task_id: usize, asid: u16) -> u64 {
+    let base = page_table_base(task_id);
+    ((asid as u64) << 48) | base
 }
 
 // ─── MMU enable sequence (called from assembly) ───────────────────
 
-/// Full MMU initialization — called from boot.s after BSS clear
+/// Full MMU initialization — called from boot.s after BSS clear.
+/// Phase J3: builds 16 page tables (4 L2_device + 3 per task + 4 kernel boot).
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_init() {
-    // Sub-phase 1: Build 2MiB identity map
-    init_tables_2mib();
+    // Per-task L2_device tables (pages 0, 1, 2) — all devices EL1-only initially
+    for task in 0..3_usize {
+        build_l2_device(PT_L2_DEVICE_0 + task);
+    }
+    // Kernel boot L2_device (page 12) — all devices EL1-accessible
+    build_l2_device(PT_L2_DEVICE_KERNEL);
 
-    // Sub-phase 2: Refine first 2MiB to 4KB pages with W^X
-    refine_kernel_pages();
+    // Per-task tables (task 0, 1, 2)
+    for task in 0..3_u8 {
+        let t = task as usize;
+        build_l3(PT_L3_TASK0 + t, task);
+        build_l2_ram(PT_L2_RAM_TASK0 + t, PT_L3_TASK0 + t);
+        build_l1(PT_L1_TASK0 + t, PT_L2_RAM_TASK0 + t, PT_L2_DEVICE_0 + t);
+    }
 
-    // Sub-phase 3: Stack guard page
-    set_guard_page();
+    // Kernel boot tables (owner_task = 0xFF → all user stacks EL1-only)
+    build_l3(PT_L3_KERNEL, 0xFF);
+    build_l2_ram(PT_L2_RAM_KERNEL, PT_L3_KERNEL);
+    build_l1(PT_L1_KERNEL, PT_L2_RAM_KERNEL, PT_L2_DEVICE_KERNEL);
 
     // Flush page table writes to memory
     core::arch::asm!(
@@ -1709,17 +2926,142 @@ pub unsafe extern "C" fn mmu_init() {
     );
 }
 
+// ─── Phase J3: Device MMIO mapping ─────────────────────────────────
+
+/// Device registry — whitelisted devices that can be mapped for EL0 tasks.
+/// GIC MMIO (L2 indices 64–66) is NEVER exposed — only safe peripherals.
+pub struct DeviceInfo {
+    /// L2 entry index (e.g., 72 for UART at 0x0900_0000)
+    pub l2_index: usize,
+    /// Hardware INTID for IRQ routing (e.g., 33 for UART0)
+    pub intid: u32,
+    /// Human-readable name
+    pub name: &'static str,
+}
+
+/// Device table — device_id indexes into this array.
+pub const DEVICES: &[DeviceInfo] = &[
+    DeviceInfo { l2_index: 72, intid: 33, name: "UART0" }, // device_id=0
+];
+
+/// Maximum device_id (for host tests)
+pub const MAX_DEVICE_ID: usize = 0; // only UART0 for now
+
+// Error codes for map_device_for_task
+pub const DEVICE_MAP_ERR_INVALID_ID: u64 = 0xFFFF_2001;
+pub const DEVICE_MAP_ERR_INVALID_TASK: u64 = 0xFFFF_2002;
+
+/// Map a device's MMIO region into a task's L2_device table as DEVICE_BLOCK_EL0.
+/// This allows the EL0 task to directly read/write the device's MMIO registers.
+///
+/// Safety: device_id must index into DEVICES. GIC is never exposed.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
+    let did = device_id as usize;
+    if did >= DEVICES.len() {
+        crate::uart_print("!!! DEVICE MAP: invalid device_id\n");
+        return DEVICE_MAP_ERR_INVALID_ID;
+    }
+    if task_id >= 3 {
+        crate::uart_print("!!! DEVICE MAP: invalid task_id\n");
+        return DEVICE_MAP_ERR_INVALID_TASK;
+    }
+
+    let dev = &DEVICES[did];
+    let l2_device = table_ptr(PT_L2_DEVICE_0 + task_id);
+    let pa = (dev.l2_index as u64) * 0x20_0000;
+
+    // Upgrade entry from DEVICE_BLOCK (EL1-only) to DEVICE_BLOCK_EL0 (EL0 accessible)
+    write_entry(l2_device, dev.l2_index, pa | DEVICE_BLOCK_EL0);
+
+    // TLB invalidate for this task's ASID
+    let asid = (task_id as u64 + 1) << 48;
+    core::arch::asm!(
+        "tlbi aside1is, {asid}",
+        "dsb ish",
+        "isb",
+        asid = in(reg) asid,
+        options(nomem, nostack)
+    );
+
+    crate::uart_print("[AegisOS] DEVICE MAP: ");
+    crate::uart_print(dev.name);
+    crate::uart_print(" -> task ");
+    crate::uart_print_hex(task_id as u64);
+    crate::uart_print("\n");
+
+    0 // success
+}
+
+/// Host-test stub for map_device_for_task
+#[cfg(not(target_arch = "aarch64"))]
+pub fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
+    let did = device_id as usize;
+    if did >= DEVICES.len() {
+        return DEVICE_MAP_ERR_INVALID_ID;
+    }
+    if task_id >= 3 {
+        return DEVICE_MAP_ERR_INVALID_TASK;
+    }
+    0 // success
+}
+
+// ─── Phase J1: Grant page mapping ──────────────────────────────────
+
+/// Map a grant page into a task's L3 table as AP_RW_EL0 (user accessible).
+/// Must be followed by TLB invalidation for the task's ASID.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn map_grant_for_task(grant_phys: u64, task_id: usize) {
+    let l3 = table_ptr(PT_L3_TASK0 + task_id);
+    let base: u64 = 0x4000_0000;
+    let index = ((grant_phys - base) / 4096) as usize;
+    if index < 512 {
+        write_entry(l3, index, grant_phys | USER_DATA_PAGE);
+        // TLB invalidate for this task's ASID
+        let asid = (task_id as u64 + 1) << 48;
+        core::arch::asm!(
+            "tlbi aside1is, {asid}",
+            "dsb ish",
+            "isb",
+            asid = in(reg) asid,
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// Unmap a grant page from a task's L3 table (revert to AP_RW_EL1, EL0 no access).
+/// Must be followed by TLB invalidation for the task's ASID.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn unmap_grant_for_task(grant_phys: u64, task_id: usize) {
+    let l3 = table_ptr(PT_L3_TASK0 + task_id);
+    let base: u64 = 0x4000_0000;
+    let index = ((grant_phys - base) / 4096) as usize;
+    if index < 512 {
+        write_entry(l3, index, grant_phys | KERNEL_DATA_PAGE);
+        // TLB invalidate for this task's ASID
+        let asid = (task_id as u64 + 1) << 48;
+        core::arch::asm!(
+            "tlbi aside1is, {asid}",
+            "dsb ish",
+            "isb",
+            asid = in(reg) asid,
+            options(nomem, nostack)
+        );
+    }
+}
+
 /// Enable MMU — called from assembly after mmu_init()
 /// This is kept in Rust for the register constant values, but the actual
 /// MSR sequence is in boot.s for precise control over instruction ordering.
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_get_config(out: *mut [u64; 4]) {
-    let l1 = table_ptr(0);
+    // Kernel boot L1 (page 13) — no EL0 user stack access
+    let l1_kernel = table_ptr(PT_L1_KERNEL);
     (*out)[0] = MAIR_VALUE;
     (*out)[1] = TCR_VALUE;
-    (*out)[2] = l1 as u64; // TTBR0
-    (*out)[3] = SCTLR_MMU_ON | SCTLR_WXN; // SCTLR bits to set
+    (*out)[2] = l1_kernel as u64; // TTBR0 = kernel boot table
+    (*out)[3] = SCTLR_MMU_ON | SCTLR_WXN;
 }
 
 ```
@@ -1737,6 +3079,7 @@ pub unsafe extern "C" fn mmu_get_config(out: *mut [u64; 4]) {
 ///
 /// Context switch: timer IRQ → save frame → pick next Ready → switch SP_EL1 → load frame → eret to EL0
 
+use crate::cap::CapBits;
 use crate::exception::TrapFrame;
 use crate::uart_print;
 
@@ -1764,6 +3107,10 @@ pub struct Tcb {
     pub entry_point: u64,     // original entry address (for restart)
     pub user_stack_top: u64,  // original SP_EL0 top (for restart)
     pub fault_tick: u64,      // tick when task was marked Faulted
+    pub caps: CapBits,        // capability bitmask (survives restart)
+    pub ttbr0: u64,           // TTBR0_EL1 value (ASID << 48 | L1 base)
+    pub notify_pending: u64,  // bitmask of pending notification bits
+    pub notify_waiting: bool, // true if task is blocked in wait_notify
 }
 
 // ─── Static task table ─────────────────────────────────────────────
@@ -1791,6 +3138,10 @@ pub const EMPTY_TCB: Tcb = Tcb {
     entry_point: 0,
     user_stack_top: 0,
     fault_tick: 0,
+    caps: 0,
+    ttbr0: 0,
+    notify_pending: 0,
+    notify_waiting: false,
 };
 
 // ─── Public API ────────────────────────────────────────────────────
@@ -1915,6 +3266,18 @@ pub fn schedule(frame: &mut TrapFrame) {
             frame as *mut TrapFrame,
             1,
         );
+
+        // Phase H: Switch TTBR0 to the new task's page table
+        #[cfg(target_arch = "aarch64")]
+        {
+            let ttbr0 = TCBS[next].ttbr0;
+            core::arch::asm!(
+                "msr ttbr0_el1, {val}",
+                "isb",
+                val = in(reg) ttbr0,
+                options(nomem, nostack)
+            );
+        }
     }
 }
 
@@ -1979,6 +3342,12 @@ pub fn fault_current_task(frame: &mut TrapFrame) {
         // Clean up IPC endpoints — unblock any partner waiting for this task
         crate::ipc::cleanup_task(current);
 
+        // Clean up shared memory grants — revoke all grants involving this task
+        crate::grant::cleanup_task(current);
+
+        // Clean up IRQ bindings — unbind all IRQs owned by this task
+        crate::irq::irq_cleanup_task(current);
+
         // Schedule away to the next ready task
         schedule(frame);
     }
@@ -2016,6 +3385,8 @@ pub fn restart_task(task_idx: usize) {
         TCBS[task_idx].context.sp_el0 = TCBS[task_idx].user_stack_top;
 
         TCBS[task_idx].state = TaskState::Ready;
+        TCBS[task_idx].notify_pending = 0;
+        TCBS[task_idx].notify_waiting = false;
 
         uart_print("[AegisOS] TASK ");
         crate::uart_print_hex(id as u64);
@@ -2037,9 +3408,13 @@ pub fn bootstrap() -> ! {
         CURRENT = 0;
 
         let frame = &TCBS[0].context;
+        let ttbr0 = TCBS[0].ttbr0;
 
         // Load the task's context into registers and eret into EL0
         core::arch::asm!(
+            // Phase H: Switch TTBR0 to task 0's per-task page table
+            "msr ttbr0_el1, {ttbr0}",
+            "isb",
             // Set ELR_EL1 = task entry, SPSR_EL1 = 0x000 (EL0t)
             "msr elr_el1, {elr}",
             "msr spsr_el1, {spsr}",
@@ -2048,6 +3423,7 @@ pub fn bootstrap() -> ! {
             // eret: CPU restores PSTATE from SPSR (EL0t), PC from ELR.
             // Task runs at EL0 with SP = SP_EL0 (user stack).
             "eret",
+            ttbr0 = in(reg) ttbr0,
             elr = in(reg) frame.elr_el1,
             spsr = in(reg) frame.spsr_el1,
             sp0 = in(reg) frame.sp_el0,

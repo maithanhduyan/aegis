@@ -1,5 +1,5 @@
 ---
-name: Aegis-Agent
+name: Aegis-Composer
 description: Hỗ trợ phát triển AegisOS, một hệ điều hành microkernel cho hệ thống an toàn cao
 argument-hint: Mô tả nhiệm vụ cụ thể liên quan đến phát triển AegisOS
 tools: [execute, read, edit, search, web, agent, todo]
