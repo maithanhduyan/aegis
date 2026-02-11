@@ -27,7 +27,7 @@ NC='\033[0m' # No Color
 check() {
     local label="$1"
     local pattern="$2"
-    if echo "$OUTPUT" | grep -q "$pattern"; then
+    if echo "$OUTPUT" | grep -qF "$pattern"; then
         echo -e "  ${GREEN}✓${NC} $label"
         PASS=$((PASS + 1))
     else
@@ -65,6 +65,8 @@ check "MMU enabled"                 "[AegisOS] MMU enabled"
 check "W^X enforced"                "[AegisOS] W^X enforced"
 check "Exceptions ready"            "[AegisOS] exceptions ready"
 check "Scheduler ready"             "[AegisOS] scheduler ready"
+check "Capabilities assigned"       "[AegisOS] capabilities assigned"
+check "Timer started"               "[AegisOS] timer started"
 check "Bootstrap into EL0"          "[AegisOS] bootstrapping into task_a"
 check "Task A sends PING"           "A:PING"
 check "Task B sends PONG"           "B:PONG"
