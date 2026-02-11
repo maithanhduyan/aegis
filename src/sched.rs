@@ -1,13 +1,16 @@
 /// Thời Khóa Biểu / Bộ lập lịch (Scheduler).
-/// AegisOS Scheduler — Round-Robin, 3 static tasks
+/// AegisOS Scheduler — Fixed-priority preemptive, 3 static tasks
 ///
 /// Tasks run at EL0 (user mode). Each task has:
 ///   - A TrapFrame (saved/restored on context switch)
 ///   - Its own 4KB kernel stack (SP_EL1, in .task_stacks section)
 ///   - Its own 4KB user stack (SP_EL0, in .user_stacks section)
 ///   - A state (Ready, Running, Inactive)
+///   - A priority (0 = lowest, 7 = highest)
+///   - A time budget per epoch (0 = unlimited)
+///   - A watchdog heartbeat interval (0 = disabled)
 ///
-/// Context switch: timer IRQ → save frame → pick next Ready → switch SP_EL1 → load frame → eret to EL0
+/// Context switch: timer IRQ → save frame → pick highest-priority Ready → switch SP_EL1 → load frame → eret to EL0
 
 use crate::cap::CapBits;
 use crate::exception::TrapFrame;
@@ -41,6 +44,13 @@ pub struct Tcb {
     pub ttbr0: u64,           // TTBR0_EL1 value (ASID << 48 | L1 base)
     pub notify_pending: u64,  // bitmask of pending notification bits
     pub notify_waiting: bool, // true if task is blocked in wait_notify
+    // ─── Phase K fields ────────────────────────────────────────────
+    pub priority: u8,            // current effective priority (0=lowest, 7=highest)
+    pub base_priority: u8,       // original priority (before inheritance)
+    pub time_budget: u64,        // max ticks per epoch (0 = unlimited)
+    pub ticks_used: u64,         // ticks consumed in current epoch
+    pub heartbeat_interval: u64, // max ticks between heartbeats (0 = disabled)
+    pub last_heartbeat: u64,     // TICK_COUNT at last heartbeat
 }
 
 // ─── Static task table ─────────────────────────────────────────────
@@ -53,6 +63,15 @@ pub static mut CURRENT: usize = 0;
 
 /// Delay before auto-restarting a faulted task (100 ticks × 10ms = 1 second)
 pub const RESTART_DELAY_TICKS: u64 = 100;
+
+/// Phase K: Epoch length in ticks (100 ticks = 1 second)
+pub const EPOCH_LENGTH: u64 = 100;
+
+/// Phase K: Epoch tick counter — resets every EPOCH_LENGTH ticks
+pub static mut EPOCH_TICKS: u64 = 0;
+
+/// Phase K: Watchdog scan interval (every 10 ticks = 100ms)
+pub const WATCHDOG_SCAN_PERIOD: u64 = 10;
 
 pub const EMPTY_TCB: Tcb = Tcb {
     context: TrapFrame {
@@ -72,6 +91,12 @@ pub const EMPTY_TCB: Tcb = Tcb {
     ttbr0: 0,
     notify_pending: 0,
     notify_waiting: false,
+    priority: 0,
+    base_priority: 0,
+    time_budget: 0,
+    ticks_used: 0,
+    heartbeat_interval: 0,
+    last_heartbeat: 0,
 };
 
 // ─── Public API ────────────────────────────────────────────────────
@@ -127,7 +152,7 @@ pub fn init(
         TCBS[2].context.sp_el0 = ustacks_base + 3 * 4096;
     }
 
-    uart_print("[AegisOS] scheduler ready (3 tasks, EL0)\n");
+    uart_print("[AegisOS] scheduler ready (3 tasks, priority-based, EL0)\n");
 }
 
 /// Schedule: save current context, pick next Ready task, load its context.
@@ -166,19 +191,28 @@ pub fn schedule(frame: &mut TrapFrame) {
             }
         }
 
-        // Round-robin: find next Ready task
-        let mut next = (old + 1) % NUM_TASKS;
+        // Phase K: Priority-based selection with budget check.
+        // Scan all tasks, pick the Ready task with highest priority
+        // that still has budget remaining. Round-robin tiebreaker.
+        let mut best_prio: i16 = -1;
+        let mut next = 2; // default to idle
         let mut found = false;
-        for _ in 0..NUM_TASKS {
-            if TCBS[next].state == TaskState::Ready {
-                found = true;
-                break;
+        for offset in 0..NUM_TASKS {
+            let idx = (old + 1 + offset) % NUM_TASKS;
+            if TCBS[idx].state == TaskState::Ready {
+                // Check time budget (0 = unlimited)
+                let budget_ok = TCBS[idx].time_budget == 0
+                    || TCBS[idx].ticks_used < TCBS[idx].time_budget;
+                if budget_ok && (TCBS[idx].priority as i16) > best_prio {
+                    best_prio = TCBS[idx].priority as i16;
+                    next = idx;
+                    found = true;
+                }
             }
-            next = (next + 1) % NUM_TASKS;
         }
 
         if !found {
-            // No ready task — force-restart idle (index 2) if faulted
+            // No ready task with budget — force idle (index 2)
             next = 2;
             if TCBS[2].state == TaskState::Faulted {
                 restart_task(2);
@@ -269,6 +303,9 @@ pub fn fault_current_task(frame: &mut TrapFrame) {
         TCBS[current].state = TaskState::Faulted;
         TCBS[current].fault_tick = crate::timer::tick_count();
 
+        // Phase K: Restore base priority (undo any inheritance)
+        TCBS[current].priority = TCBS[current].base_priority;
+
         // Clean up IPC endpoints — unblock any partner waiting for this task
         crate::ipc::cleanup_task(current);
 
@@ -318,9 +355,101 @@ pub fn restart_task(task_idx: usize) {
         TCBS[task_idx].notify_pending = 0;
         TCBS[task_idx].notify_waiting = false;
 
+        // Phase K: Reset scheduling state on restart
+        TCBS[task_idx].priority = TCBS[task_idx].base_priority;
+        TCBS[task_idx].ticks_used = 0;
+        TCBS[task_idx].last_heartbeat = crate::timer::tick_count();
+
         uart_print("[AegisOS] TASK ");
         crate::uart_print_hex(id as u64);
         uart_print(" RESTARTED\n");
+    }
+}
+
+// ─── Phase K helper functions ──────────────────────────────────────
+
+/// Reset all tasks' ticks_used to 0 at the start of a new epoch.
+/// Called from timer tick_handler when EPOCH_TICKS reaches EPOCH_LENGTH.
+pub fn epoch_reset() {
+    unsafe {
+        EPOCH_TICKS = 0;
+        for i in 0..NUM_TASKS {
+            TCBS[i].ticks_used = 0;
+        }
+    }
+}
+
+/// Scan all tasks for watchdog heartbeat violations.
+/// If a task has heartbeat_interval > 0 and hasn't sent a heartbeat
+/// within that interval, mark it Faulted (will auto-restart after delay).
+pub fn watchdog_scan() {
+    let now = crate::timer::tick_count();
+    unsafe {
+        for i in 0..NUM_TASKS {
+            let hb = TCBS[i].heartbeat_interval;
+            if hb == 0 {
+                continue; // watchdog disabled for this task
+            }
+            if TCBS[i].state == TaskState::Faulted || TCBS[i].state == TaskState::Inactive {
+                continue; // already faulted or inactive
+            }
+            let elapsed = now.wrapping_sub(TCBS[i].last_heartbeat);
+            if elapsed > hb {
+                #[cfg(target_arch = "aarch64")]
+                {
+                    uart_print("[AegisOS] WATCHDOG: task ");
+                    crate::uart_print_hex(TCBS[i].id as u64);
+                    uart_print(" missed heartbeat\n");
+                }
+                TCBS[i].state = TaskState::Faulted;
+                TCBS[i].fault_tick = now;
+                TCBS[i].priority = TCBS[i].base_priority;
+                crate::ipc::cleanup_task(i);
+            }
+        }
+    }
+}
+
+/// Set a task's effective priority (used for priority inheritance).
+/// Does nothing if task_idx is out of range.
+pub fn set_task_priority(task_idx: usize, priority: u8) {
+    if task_idx < NUM_TASKS {
+        unsafe { TCBS[task_idx].priority = priority; }
+    }
+}
+
+/// Get a task's current effective priority.
+pub fn get_task_priority(task_idx: usize) -> u8 {
+    if task_idx < NUM_TASKS {
+        unsafe { TCBS[task_idx].priority }
+    } else {
+        0
+    }
+}
+
+/// Get a task's base (original) priority.
+pub fn get_task_base_priority(task_idx: usize) -> u8 {
+    if task_idx < NUM_TASKS {
+        unsafe { TCBS[task_idx].base_priority }
+    } else {
+        0
+    }
+}
+
+/// Restore a task's priority to its base priority (undo inheritance).
+pub fn restore_base_priority(task_idx: usize) {
+    if task_idx < NUM_TASKS {
+        unsafe { TCBS[task_idx].priority = TCBS[task_idx].base_priority; }
+    }
+}
+
+/// Record a heartbeat for the current task.
+pub fn record_heartbeat(task_idx: usize, interval: u64) {
+    if task_idx < NUM_TASKS {
+        unsafe {
+            TCBS[task_idx].heartbeat_interval = interval;
+            TCBS[task_idx].last_heartbeat = crate::timer::tick_count();
+        }
     }
 }
 

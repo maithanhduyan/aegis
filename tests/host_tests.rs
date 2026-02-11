@@ -30,6 +30,7 @@ use aegis_os::cap::{
     CAP_GRANT_CREATE, CAP_GRANT_REVOKE,
     CAP_IRQ_BIND, CAP_IRQ_ACK,
     CAP_DEVICE_MAP,
+    CAP_HEARTBEAT,
     CAP_ALL, CAP_NONE,
 };
 use aegis_os::grant::{self, EMPTY_GRANT, MAX_GRANTS};
@@ -738,6 +739,10 @@ fn cap_bits_are_distinct_powers_of_two() {
         CAP_NOTIFY, CAP_WAIT_NOTIFY,
         CAP_IPC_SEND_EP2, CAP_IPC_RECV_EP2,
         CAP_IPC_SEND_EP3, CAP_IPC_RECV_EP3,
+        CAP_GRANT_CREATE, CAP_GRANT_REVOKE,
+        CAP_IRQ_BIND, CAP_IRQ_ACK,
+        CAP_DEVICE_MAP,
+        CAP_HEARTBEAT,
     ];
     // Each must be a single bit (power of 2)
     for &c in &all {
@@ -766,6 +771,12 @@ fn cap_all_includes_every_bit() {
     assert!(cap::cap_check(CAP_ALL, CAP_IPC_RECV_EP2));
     assert!(cap::cap_check(CAP_ALL, CAP_IPC_SEND_EP3));
     assert!(cap::cap_check(CAP_ALL, CAP_IPC_RECV_EP3));
+    assert!(cap::cap_check(CAP_ALL, CAP_GRANT_CREATE));
+    assert!(cap::cap_check(CAP_ALL, CAP_GRANT_REVOKE));
+    assert!(cap::cap_check(CAP_ALL, CAP_IRQ_BIND));
+    assert!(cap::cap_check(CAP_ALL, CAP_IRQ_ACK));
+    assert!(cap::cap_check(CAP_ALL, CAP_DEVICE_MAP));
+    assert!(cap::cap_check(CAP_ALL, CAP_HEARTBEAT));
 }
 
 #[test]
@@ -1699,4 +1710,406 @@ fn page_table_constants_j3() {
     assert_eq!(mmu::PT_L2_DEVICE_KERNEL, 12);
     assert_eq!(mmu::PT_L1_KERNEL, 13);
     assert_eq!(mmu::PT_L3_KERNEL, 15);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 14. Priority Scheduler Tests (Phase K1)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn sched_priority_higher_wins() {
+    unsafe {
+        reset_test_state();
+
+        // Task 0 (Running), priority=2
+        // Task 1 (Ready), priority=5
+        // Task 2 (Ready), priority=1
+        sched::TCBS[0].priority = 2;
+        sched::TCBS[0].base_priority = 2;
+        sched::TCBS[1].priority = 5;
+        sched::TCBS[1].base_priority = 5;
+        sched::TCBS[2].priority = 1;
+        sched::TCBS[2].base_priority = 1;
+
+        let mut frame = TrapFrame {
+            x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
+        };
+        sched::schedule(&mut frame);
+
+        // Should pick task 1 (priority=5, highest among Ready tasks)
+        assert_eq!(read_current(), 1);
+        assert_eq!(sched::TCBS[1].state, TaskState::Running);
+    }
+}
+
+#[test]
+fn sched_same_priority_round_robin() {
+    unsafe {
+        reset_test_state();
+
+        // All tasks at same priority
+        for i in 0..NUM_TASKS {
+            sched::TCBS[i].priority = 3;
+            sched::TCBS[i].base_priority = 3;
+        }
+
+        let mut frame = TrapFrame {
+            x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
+        };
+
+        // From task 0 → should pick task 1 (round-robin tiebreaker)
+        sched::schedule(&mut frame);
+        assert_eq!(read_current(), 1);
+
+        // From task 1 → should pick task 2
+        sched::schedule(&mut frame);
+        assert_eq!(read_current(), 2);
+
+        // From task 2 → should wrap to task 0
+        sched::schedule(&mut frame);
+        assert_eq!(read_current(), 0);
+    }
+}
+
+#[test]
+fn sched_budget_exhausted_skips_task() {
+    unsafe {
+        reset_test_state();
+
+        // Task 1: priority=5, budget=50, used=50 (exhausted)
+        sched::TCBS[1].priority = 5;
+        sched::TCBS[1].base_priority = 5;
+        sched::TCBS[1].time_budget = 50;
+        sched::TCBS[1].ticks_used = 50;
+
+        // Task 2: priority=1, unlimited budget
+        sched::TCBS[2].priority = 1;
+        sched::TCBS[2].base_priority = 1;
+        sched::TCBS[2].time_budget = 0;
+
+        // Task 0: Running, priority=3
+        sched::TCBS[0].priority = 3;
+        sched::TCBS[0].base_priority = 3;
+
+        let mut frame = TrapFrame {
+            x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
+        };
+        sched::schedule(&mut frame);
+
+        // Task 1 has highest priority but exhausted budget → skip
+        // Task 0 has priority 3, Task 2 has priority 1
+        // Task 0 was Running → now Ready, so it's a candidate
+        // Scan starts from (old+1), so task 1 (skip), task 2 (prio 1), task 0 (prio 3)
+        // Best is task 0 with priority 3
+        assert_eq!(read_current(), 0);
+    }
+}
+
+#[test]
+fn sched_unlimited_budget_never_exhausted() {
+    unsafe {
+        reset_test_state();
+
+        // Task with budget=0 (unlimited) should run even with high ticks_used
+        sched::TCBS[1].priority = 5;
+        sched::TCBS[1].base_priority = 5;
+        sched::TCBS[1].time_budget = 0;
+        sched::TCBS[1].ticks_used = 999999;
+
+        let mut frame = TrapFrame {
+            x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
+        };
+        sched::schedule(&mut frame);
+        assert_eq!(read_current(), 1, "unlimited budget should never exhaust");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 15. Time Budget / Epoch Tests (Phase K2)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn sched_epoch_reset_clears_ticks() {
+    unsafe {
+        reset_test_state();
+
+        sched::TCBS[0].ticks_used = 42;
+        sched::TCBS[1].ticks_used = 50;
+        sched::TCBS[2].ticks_used = 10;
+        sched::EPOCH_TICKS = 99;
+
+        sched::epoch_reset();
+
+        assert_eq!(sched::EPOCH_TICKS, 0, "epoch counter should reset");
+        for i in 0..NUM_TASKS {
+            assert_eq!(sched::TCBS[i].ticks_used, 0,
+                "task {} ticks_used should be reset", i);
+        }
+    }
+}
+
+#[test]
+fn sched_epoch_length_constant() {
+    assert_eq!(sched::EPOCH_LENGTH, 100);
+}
+
+#[test]
+fn sched_watchdog_scan_period_constant() {
+    assert_eq!(sched::WATCHDOG_SCAN_PERIOD, 10);
+}
+
+#[test]
+fn sched_empty_tcb_phase_k_fields_zeroed() {
+    assert_eq!(EMPTY_TCB.priority, 0);
+    assert_eq!(EMPTY_TCB.base_priority, 0);
+    assert_eq!(EMPTY_TCB.time_budget, 0);
+    assert_eq!(EMPTY_TCB.ticks_used, 0);
+    assert_eq!(EMPTY_TCB.heartbeat_interval, 0);
+    assert_eq!(EMPTY_TCB.last_heartbeat, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 16. Watchdog Heartbeat Tests (Phase K3)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn sched_record_heartbeat() {
+    unsafe {
+        reset_test_state();
+        aegis_os::timer::TICK_COUNT = 42;
+        sched::record_heartbeat(0, 50);
+        assert_eq!(sched::TCBS[0].heartbeat_interval, 50);
+        assert_eq!(sched::TCBS[0].last_heartbeat, 42);
+    }
+}
+
+#[test]
+fn sched_record_heartbeat_disable() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].heartbeat_interval = 50;
+        sched::record_heartbeat(0, 0);
+        assert_eq!(sched::TCBS[0].heartbeat_interval, 0, "interval 0 disables watchdog");
+    }
+}
+
+#[test]
+fn sched_watchdog_scan_no_violation() {
+    unsafe {
+        reset_test_state();
+
+        // Task 0: heartbeat interval=50, last=10, now=40 → elapsed=30 < 50 → OK
+        sched::TCBS[0].heartbeat_interval = 50;
+        sched::TCBS[0].last_heartbeat = 10;
+        aegis_os::timer::TICK_COUNT = 40;
+
+        sched::watchdog_scan();
+
+        assert_ne!(sched::TCBS[0].state, TaskState::Faulted,
+            "task should not be faulted (heartbeat within interval)");
+    }
+}
+
+#[test]
+fn sched_watchdog_scan_violation_faults_task() {
+    unsafe {
+        reset_test_state();
+
+        // Task 1: heartbeat interval=50, last=10, now=70 → elapsed=60 > 50 → FAULT
+        sched::TCBS[1].heartbeat_interval = 50;
+        sched::TCBS[1].last_heartbeat = 10;
+        sched::TCBS[1].priority = 5;
+        sched::TCBS[1].base_priority = 3;
+        aegis_os::timer::TICK_COUNT = 70;
+
+        sched::watchdog_scan();
+
+        assert_eq!(sched::TCBS[1].state, TaskState::Faulted,
+            "task should be faulted (heartbeat expired)");
+        assert_eq!(sched::TCBS[1].fault_tick, 70);
+        assert_eq!(sched::TCBS[1].priority, sched::TCBS[1].base_priority,
+            "priority should be restored to base on fault");
+    }
+}
+
+#[test]
+fn sched_watchdog_scan_skips_disabled() {
+    unsafe {
+        reset_test_state();
+
+        // Task with heartbeat_interval=0 (disabled) should never be faulted
+        sched::TCBS[0].heartbeat_interval = 0;
+        sched::TCBS[0].last_heartbeat = 0;
+        aegis_os::timer::TICK_COUNT = 1000;
+
+        sched::watchdog_scan();
+
+        assert_ne!(sched::TCBS[0].state, TaskState::Faulted,
+            "disabled watchdog should not fault task");
+    }
+}
+
+#[test]
+fn sched_watchdog_scan_skips_already_faulted() {
+    unsafe {
+        reset_test_state();
+
+        sched::TCBS[0].heartbeat_interval = 50;
+        sched::TCBS[0].last_heartbeat = 0;
+        sched::TCBS[0].state = TaskState::Faulted;
+        sched::TCBS[0].fault_tick = 5;
+        aegis_os::timer::TICK_COUNT = 100;
+
+        sched::watchdog_scan();
+
+        // fault_tick should not be updated (task already faulted)
+        assert_eq!(sched::TCBS[0].fault_tick, 5,
+            "already-faulted task should not be re-faulted");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 17. Capability Heartbeat Tests (Phase K3)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn cap_heartbeat_bit_is_power_of_two() {
+    assert!(CAP_HEARTBEAT != 0);
+    assert_eq!(CAP_HEARTBEAT & (CAP_HEARTBEAT - 1), 0);
+}
+
+#[test]
+fn cap_heartbeat_is_bit_17() {
+    assert_eq!(CAP_HEARTBEAT, 1 << 17);
+}
+
+#[test]
+fn cap_all_includes_heartbeat() {
+    assert_ne!(CAP_ALL & CAP_HEARTBEAT, 0, "CAP_ALL should include HEARTBEAT");
+}
+
+#[test]
+fn cap_for_syscall_heartbeat() {
+    assert_eq!(cap::cap_for_syscall(12, 0), CAP_HEARTBEAT);
+    assert_eq!(cap::cap_for_syscall(12, 99), CAP_HEARTBEAT); // ep_id ignored
+}
+
+#[test]
+fn cap_name_heartbeat() {
+    assert_eq!(cap::cap_name(CAP_HEARTBEAT), "HEARTBEAT");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 18. Priority Inheritance Tests (Phase K4)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn sched_set_task_priority() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].priority = 2;
+        sched::set_task_priority(0, 7);
+        assert_eq!(sched::TCBS[0].priority, 7);
+    }
+}
+
+#[test]
+fn sched_get_task_priority() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[1].priority = 5;
+        assert_eq!(sched::get_task_priority(1), 5);
+    }
+}
+
+#[test]
+fn sched_get_task_base_priority() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[1].base_priority = 3;
+        sched::TCBS[1].priority = 7; // boosted
+        assert_eq!(sched::get_task_base_priority(1), 3);
+    }
+}
+
+#[test]
+fn sched_restore_base_priority() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].base_priority = 2;
+        sched::TCBS[0].priority = 7; // boosted by inheritance
+        sched::restore_base_priority(0);
+        assert_eq!(sched::TCBS[0].priority, 2, "priority should be restored to base");
+    }
+}
+
+#[test]
+fn sched_priority_restored_on_fault() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].base_priority = 2;
+        sched::TCBS[0].priority = 7; // boosted by inheritance
+        sched::TCBS[0].state = TaskState::Faulted;
+        sched::TCBS[0].fault_tick = 0;
+
+        // Simulate restart
+        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS;
+        let mut frame = TrapFrame {
+            x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
+        };
+        sched::schedule(&mut frame);
+
+        assert_eq!(sched::TCBS[0].priority, 2,
+            "priority should be restored to base after restart");
+    }
+}
+
+#[test]
+fn sched_out_of_range_set_priority_is_noop() {
+    unsafe {
+        reset_test_state();
+        // Should not crash for out-of-range index
+        sched::set_task_priority(NUM_TASKS, 5);
+        sched::set_task_priority(NUM_TASKS + 1, 5);
+        assert_eq!(sched::get_task_priority(NUM_TASKS), 0);
+    }
+}
+
+#[test]
+fn sched_ticks_used_reset_on_restart() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[1].ticks_used = 42;
+        sched::TCBS[1].state = TaskState::Faulted;
+        sched::TCBS[1].fault_tick = 0;
+
+        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS;
+        let mut frame = TrapFrame {
+            x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
+        };
+        sched::schedule(&mut frame);
+
+        assert_eq!(sched::TCBS[1].ticks_used, 0,
+            "ticks_used should be 0 after restart");
+    }
+}
+
+#[test]
+fn sched_heartbeat_reset_on_restart() {
+    unsafe {
+        reset_test_state();
+        sched::TCBS[1].heartbeat_interval = 50;
+        sched::TCBS[1].last_heartbeat = 10;
+        sched::TCBS[1].state = TaskState::Faulted;
+        sched::TCBS[1].fault_tick = 0;
+
+        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS;
+        let mut frame = TrapFrame {
+            x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
+        };
+        sched::schedule(&mut frame);
+
+        assert_eq!(sched::TCBS[1].last_heartbeat, RESTART_DELAY_TICKS,
+            "last_heartbeat should be reset to current tick on restart");
+    }
 }

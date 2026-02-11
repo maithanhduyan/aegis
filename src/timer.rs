@@ -77,6 +77,23 @@ pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
     // Re-arm for next tick
     rearm();
 
+    // Phase K: Track budget for current running task
+    unsafe {
+        let current = crate::sched::CURRENT;
+        crate::sched::TCBS[current].ticks_used += 1;
+
+        // Phase K: Epoch management — reset budgets every EPOCH_LENGTH ticks
+        crate::sched::EPOCH_TICKS += 1;
+        if crate::sched::EPOCH_TICKS >= crate::sched::EPOCH_LENGTH {
+            crate::sched::epoch_reset();
+        }
+
+        // Phase K: Watchdog scan at regular intervals
+        if TICK_COUNT % crate::sched::WATCHDOG_SCAN_PERIOD == 0 {
+            crate::sched::watchdog_scan();
+        }
+    }
+
     // Context switch via scheduler
     crate::sched::schedule(frame);
 }

@@ -49,6 +49,8 @@ pub const CAP_IRQ_BIND: CapBits = 1 << 14;
 pub const CAP_IRQ_ACK: CapBits = 1 << 15;
 /// Permission to map a device's MMIO into user-space (SYS_DEVICE_MAP)
 pub const CAP_DEVICE_MAP: CapBits = 1 << 16;
+/// Permission to register watchdog heartbeat (SYS_HEARTBEAT)
+pub const CAP_HEARTBEAT: CapBits = 1 << 17;
 
 // ─── Convenience combos ────────────────────────────────────────────
 
@@ -69,7 +71,8 @@ pub const CAP_ALL: CapBits = CAP_IPC_SEND_EP0
     | CAP_GRANT_REVOKE
     | CAP_IRQ_BIND
     | CAP_IRQ_ACK
-    | CAP_DEVICE_MAP;
+    | CAP_DEVICE_MAP
+    | CAP_HEARTBEAT;
 
 /// No capabilities
 pub const CAP_NONE: CapBits = 0;
@@ -134,6 +137,8 @@ pub fn cap_for_syscall(syscall_nr: u64, ep_id: u64) -> CapBits {
         10 => CAP_IRQ_ACK,
         // SYS_DEVICE_MAP = 11
         11 => CAP_DEVICE_MAP,
+        // SYS_HEARTBEAT = 12
+        12 => CAP_HEARTBEAT,
         // Unknown syscall — no valid cap
         _ => 0,
     }
@@ -160,6 +165,7 @@ pub fn cap_name(cap: CapBits) -> &'static str {
         CAP_IRQ_BIND      => "IRQ_BIND",
         CAP_IRQ_ACK       => "IRQ_ACK",
         CAP_DEVICE_MAP    => "DEVICE_MAP",
+        CAP_HEARTBEAT     => "HEARTBEAT",
         CAP_ALL           => "ALL",
         CAP_NONE          => "NONE",
         _                 => "UNKNOWN",

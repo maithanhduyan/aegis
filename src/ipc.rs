@@ -123,6 +123,9 @@ pub fn sys_send(frame: &mut TrapFrame, ep_id: usize) {
             // Receiver is waiting — deliver message directly
             copy_message(current, recv_task);
 
+            // Phase K4: Restore receiver's base priority if it was boosted
+            sched::restore_base_priority(recv_task);
+
             // Unblock receiver
             sched::set_task_state(recv_task, TaskState::Ready);
 
@@ -158,6 +161,9 @@ pub fn sys_recv(frame: &mut TrapFrame, ep_id: usize) {
             // Sender is waiting — receive message directly
             copy_message(send_task, current);
 
+            // Phase K4: Restore sender's base priority if it was boosted
+            sched::restore_base_priority(send_task);
+
             // Unblock sender
             sched::set_task_state(send_task, TaskState::Ready);
 
@@ -189,10 +195,19 @@ pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
         if let Some(recv_task) = ENDPOINTS[ep_id].receiver.take() {
             // Receiver is waiting — deliver message
             copy_message(current, recv_task);
+
+            // Phase K4: Restore receiver's base priority if it was boosted
+            sched::restore_base_priority(recv_task);
+
             sched::set_task_state(recv_task, TaskState::Ready);
 
             // Now block ourselves waiting for reply
             ENDPOINTS[ep_id].receiver = Some(current);
+
+            // Phase K4: Boost the receiver if our priority is higher
+            // (prevents priority inversion during call-reply pattern)
+            maybe_boost_priority(current, recv_task);
+
             sched::set_task_state(current, TaskState::Blocked);
             sched::schedule(frame);
         } else {
@@ -214,6 +229,20 @@ pub unsafe fn copy_message(from_task: usize, to_task: usize) {
     for i in 0..MSG_REGS {
         let val = sched::get_task_reg(from_task, i);
         sched::set_task_reg(to_task, i, val);
+    }
+}
+
+// ─── Phase K4: Priority Inheritance helper ─────────────────────────
+
+/// Boost a target task's priority if the current task has higher priority.
+/// This prevents priority inversion: if a high-priority task is waiting
+/// on a low-priority task, the low-priority task inherits the higher
+/// priority temporarily so it can complete its work faster.
+fn maybe_boost_priority(blocker: usize, holder: usize) {
+    let blocker_prio = sched::get_task_priority(blocker);
+    let holder_prio = sched::get_task_priority(holder);
+    if blocker_prio > holder_prio {
+        sched::set_task_priority(holder, blocker_prio);
     }
 }
 

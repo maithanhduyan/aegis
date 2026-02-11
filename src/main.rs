@@ -267,6 +267,25 @@ pub fn syscall_device_map(device_id: u64) -> u64 {
     result
 }
 
+/// SYS_HEARTBEAT (syscall #12): register/refresh watchdog heartbeat.
+/// x0 = heartbeat interval in ticks (0 = disable watchdog).
+/// Returns result in x0 (0 = success).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn syscall_heartbeat(interval: u64) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") interval,
+            in("x7") 12u64, // SYS_HEARTBEAT
+            lateout("x0") result,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+
 // ─── Task entry points (Phase J4: User-Mode UART Driver PoC) ───────
 
 /// UART0 PL011 Data Register address (identity-mapped after SYS_DEVICE_MAP)
@@ -284,11 +303,16 @@ pub extern "C" fn uart_driver_entry() -> ! {
     // 1. Map UART0 MMIO into our address space (EL0 accessible)
     syscall_device_map(0); // device_id=0 = UART0
 
-    // 2. Announce we're ready (still using SYS_WRITE for initial status)
+    // 2. Register watchdog heartbeat (50 ticks = 500ms interval)
+    syscall_heartbeat(50);
+
+    // 3. Announce we're ready (still using SYS_WRITE for initial status)
     user_print("DRV:ready ");
 
-    // 3. Serve client requests forever
+    // 4. Serve client requests forever
     loop {
+        // Refresh heartbeat each iteration
+        syscall_heartbeat(50);
         // Block waiting for an IPC request on EP 0
         let (buf_addr_raw, len_raw) = syscall_recv2(0);
 
@@ -321,10 +345,15 @@ pub extern "C" fn client_entry() -> ! {
     // 1. Create a shared memory grant: grant 0, owner=us(task 1), peer=driver(task 0)
     syscall_grant_create(0, 0); // grant_id=0, peer_task_id=0
 
-    // 2. Get the grant page address (identity-mapped, known at compile time)
+    // 2. Register watchdog heartbeat (50 ticks = 500ms interval)
+    syscall_heartbeat(50);
+
+    // 3. Get the grant page address (identity-mapped, known at compile time)
     let grant_addr = aegis_os::grant::grant_page_addr(0).unwrap_or(0) as *mut u8;
 
     loop {
+        // Refresh heartbeat each iteration
+        syscall_heartbeat(50);
         // 3. Write the message into the grant page
         let msg = b"J4:UserDrv ";
         unsafe {
@@ -372,17 +401,39 @@ pub extern "C" fn kernel_main() -> ! {
     // ─── Phase G: Assign capabilities ──────────────────────────────
     unsafe {
         use aegis_os::cap::*;
-        // Task 0 (UART driver): needs RECV/SEND on EP0 + WRITE + YIELD + notifications + grants + IRQ + device map
+        // Task 0 (UART driver): needs RECV/SEND on EP0 + WRITE + YIELD + notifications + grants + IRQ + device map + heartbeat
         sched::TCBS[0].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
             | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE
-            | CAP_IRQ_BIND | CAP_IRQ_ACK | CAP_DEVICE_MAP;
-        // Task 1 (client): needs CALL on EP0 + WRITE + YIELD + notifications + grants
+            | CAP_IRQ_BIND | CAP_IRQ_ACK | CAP_DEVICE_MAP | CAP_HEARTBEAT;
+        // Task 1 (client): needs CALL on EP0 + WRITE + YIELD + notifications + grants + heartbeat
         sched::TCBS[1].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
-            | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE;
+            | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE
+            | CAP_HEARTBEAT;
         // Task 2 (idle): only needs YIELD (WFI loop)
         sched::TCBS[2].caps = CAP_YIELD;
     }
     uart_print("[AegisOS] capabilities assigned\n");
+
+    // ─── Phase K: Assign priorities and time budgets ────────────────
+    unsafe {
+        // Task 0 (UART driver): high priority, unlimited budget
+        sched::TCBS[0].priority = 6;
+        sched::TCBS[0].base_priority = 6;
+        sched::TCBS[0].time_budget = 0; // unlimited
+
+        // Task 1 (client): medium priority, 50 ticks budget per epoch
+        sched::TCBS[1].priority = 4;
+        sched::TCBS[1].base_priority = 4;
+        sched::TCBS[1].time_budget = 50;
+
+        // Task 2 (idle): lowest priority, unlimited budget
+        sched::TCBS[2].priority = 0;
+        sched::TCBS[2].base_priority = 0;
+        sched::TCBS[2].time_budget = 0; // unlimited
+    }
+    uart_print("[AegisOS] priority scheduler configured\n");
+    uart_print("[AegisOS] time budget enforcement enabled\n");
+    uart_print("[AegisOS] watchdog heartbeat enabled\n");
     uart_print("[AegisOS] notification system ready\n");
     uart_print("[AegisOS] grant system ready\n");
     uart_print("[AegisOS] IRQ routing ready\n");

@@ -406,6 +406,8 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
         10 => handle_irq_ack(frame),
         // SYS_DEVICE_MAP = 11: map device MMIO into user-space (x0=device_id)
         11 => handle_device_map(frame),
+        // SYS_HEARTBEAT = 12: register watchdog heartbeat (x0=interval in ticks)
+        12 => handle_heartbeat(frame),
         _ => {
             uart_print("!!! unknown syscall #");
             uart_print_hex(syscall_nr);
@@ -555,6 +557,17 @@ fn handle_device_map(frame: &mut TrapFrame) {
     let current = unsafe { crate::sched::CURRENT };
     let result = unsafe { crate::mmu::map_device_for_task(device_id, current) };
     frame.x[0] = result;
+}
+
+/// SYS_HEARTBEAT handler: register or refresh watchdog heartbeat.
+/// x0 = heartbeat interval in ticks (0 = disable watchdog for this task).
+/// Updates the task's heartbeat_interval and resets last_heartbeat to now.
+#[cfg(target_arch = "aarch64")]
+fn handle_heartbeat(frame: &mut TrapFrame) {
+    let interval = frame.x[0];
+    let current = unsafe { crate::sched::CURRENT };
+    crate::sched::record_heartbeat(current, interval);
+    frame.x[0] = 0; // success
 }
 
 /// Instruction Abort handler — fault task if from lower EL, halt if from same EL

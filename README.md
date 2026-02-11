@@ -209,6 +209,10 @@ Explanations of OS concepts written for 5th-graders — making kernel developmen
 5. [Khi một task ngã, cả hệ thống không được ngã theo](docs/blog/05-khi-mot-task-nga-ca-he-thong-khong-duoc-nga-theo.md)
 6. [Làm sao biết hệ thống an toàn thật?](docs/blog/06-lam-sao-biet-he-thong-an-toan-that.md)
 7. [Giấy phép cho phần mềm — Ai được làm gì?](docs/blog/07-giay-phep-cho-phan-mem-ai-duoc-lam-gi.md)
+8. [Mỗi chương trình một bản đồ riêng](docs/blog/08-moi-chuong-trinh-mot-ban-do-rieng.md)
+9. [Chuông cửa và hàng đợi — Nói chuyện không cần chờ](docs/blog/09-chuong-cua-va-hang-doi-noi-chuyen-khong-can-cho.md)
+10. [Khi chương trình tự nói chuyện với phần cứng](docs/blog/10-khi-chuong-trinh-tu-noi-chuyen-voi-phan-cung.md)
+11. [Ai được chạy trước? Và ai canh gác?](docs/blog/11-ai-duoc-chay-truoc-va-ai-canh-gac.md)
 
 ## 📜 Safety Standards Reference
 
