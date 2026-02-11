@@ -10,8 +10,16 @@ name: AegisOS CI
 on:
   push:
     branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci.yml"
+      - "rust-toolchain.toml"
+      - ".cargo/config.toml"
+      - "linker.ld"
+      - "aarch64-aegis.json"
 
 env:
   CARGO_TERM_COLOR: always
