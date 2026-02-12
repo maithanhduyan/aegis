@@ -188,3 +188,65 @@ pub fn set_page_attr(task_id: usize, vaddr: u64, _template: u64) -> u64 {
     }
     0 // success
 }
+
+// ─── Kani formal verification proofs ───────────────────────────────
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Prove: pt_index never returns out-of-bounds for valid task_id.
+    /// For all task_id ∈ [0, NUM_TASKS) and all 4 PageTableType variants,
+    /// the returned index is < NUM_PAGE_TABLE_PAGES.
+    /// Also proves all 4 indices per task are mutually distinct.
+    #[kani::proof]
+    fn pt_index_in_bounds() {
+        let task_id: usize = kani::any();
+        kani::assume(task_id < NUM_TASKS);
+
+        let idx_l2d = pt_index(task_id, PageTableType::L2Device);
+        let idx_l1  = pt_index(task_id, PageTableType::L1);
+        let idx_l2r = pt_index(task_id, PageTableType::L2Ram);
+        let idx_l3  = pt_index(task_id, PageTableType::L3);
+
+        // All indices within page table array bounds
+        assert!(idx_l2d < NUM_PAGE_TABLE_PAGES, "L2Device index OOB");
+        assert!(idx_l1  < NUM_PAGE_TABLE_PAGES, "L1 index OOB");
+        assert!(idx_l2r < NUM_PAGE_TABLE_PAGES, "L2Ram index OOB");
+        assert!(idx_l3  < NUM_PAGE_TABLE_PAGES, "L3 index OOB");
+
+        // All 4 indices are distinct (no aliasing)
+        assert_ne!(idx_l2d, idx_l1,  "L2Device aliases L1");
+        assert_ne!(idx_l2d, idx_l2r, "L2Device aliases L2Ram");
+        assert_ne!(idx_l2d, idx_l3,  "L2Device aliases L3");
+        assert_ne!(idx_l1,  idx_l2r, "L1 aliases L2Ram");
+        assert_ne!(idx_l1,  idx_l3,  "L1 aliases L3");
+        assert_ne!(idx_l2r, idx_l3,  "L2Ram aliases L3");
+    }
+
+    /// Prove: no two different tasks share the same page table index.
+    /// For any two distinct task_ids and any PageTableType,
+    /// pt_index produces distinct values.
+    #[kani::proof]
+    fn pt_index_no_task_aliasing() {
+        let t1: usize = kani::any();
+        let t2: usize = kani::any();
+        kani::assume(t1 < NUM_TASKS);
+        kani::assume(t2 < NUM_TASKS);
+        kani::assume(t1 != t2);
+
+        let pt: usize = kani::any();
+        kani::assume(pt <= 3);
+
+        let types = [
+            PageTableType::L2Device,
+            PageTableType::L1,
+            PageTableType::L2Ram,
+            PageTableType::L3,
+        ];
+        let idx1 = pt_index(t1, types[pt]);
+        let idx2 = pt_index(t2, types[pt]);
+
+        assert_ne!(idx1, idx2, "two different tasks share a page table index");
+    }
+}

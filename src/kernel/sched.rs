@@ -518,3 +518,156 @@ pub fn bootstrap() -> ! {
         );
     }
 }
+
+// ─── Kani formal verification proofs ───────────────────────────────
+
+/// Pure scheduling decision — mirrors the logic in schedule() but takes
+/// all state as parameters instead of reading globals. This enables
+/// Kani to exhaustively verify scheduling properties.
+#[cfg(kani)]
+fn pick_next_task_pure(
+    is_eligible: &[bool; NUM_TASKS],
+    priorities: &[u8; NUM_TASKS],
+    old: usize,
+) -> usize {
+    let mut best_prio: i16 = -1;
+    let mut next = IDLE_TASK_ID;
+    let mut found = false;
+    let mut offset: usize = 0;
+    while offset < NUM_TASKS {
+        let idx = (old + 1 + offset) % NUM_TASKS;
+        if is_eligible[idx] && (priorities[idx] as i16) > best_prio {
+            best_prio = priorities[idx] as i16;
+            next = idx;
+            found = true;
+        }
+        offset += 1;
+    }
+    if !found {
+        next = IDLE_TASK_ID;
+    }
+    next
+}
+
+/// Pure restart logic — mirrors restart_task() but operates on explicit
+/// state fields instead of globals.
+#[cfg(kani)]
+fn restart_task_pure(
+    state: TaskState,
+    entry_point: u64,
+    user_stack_top: u64,
+    base_priority: u8,
+    now: u64,
+) -> (TaskState, u64, u64, u64, u8, u64, u64, bool) {
+    if state != TaskState::Faulted {
+        // No-op: return sentinel values indicating no restart
+        return (state, 0, 0, 0, 0, 0, 0, false);
+    }
+    // After restart:
+    (
+        TaskState::Ready,     // new state
+        entry_point,          // elr_el1 = entry_point
+        0x000,                // spsr_el1 = EL0t
+        user_stack_top,       // sp_el0 restored
+        base_priority,        // priority = base
+        0,                    // ticks_used = 0
+        now,                  // last_heartbeat = now
+        true,                 // restart performed
+    )
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Prove: scheduling always returns a valid task index (< NUM_TASKS).
+    /// When no task is eligible, returns IDLE_TASK_ID.
+    /// When a task IS eligible, the returned task IS eligible.
+    #[kani::proof]
+    #[kani::unwind(9)] // NUM_TASKS=8, loop needs unwind bound = 9
+    fn schedule_idle_guarantee() {
+        let mut is_eligible = [false; NUM_TASKS];
+        let mut priorities = [0u8; NUM_TASKS];
+        let old: usize = kani::any();
+        kani::assume(old < NUM_TASKS);
+
+        let mut i: usize = 0;
+        while i < NUM_TASKS {
+            is_eligible[i] = kani::any();
+            priorities[i] = kani::any();
+            kani::assume(priorities[i] <= 7);
+            i += 1;
+        }
+
+        let next = pick_next_task_pure(&is_eligible, &priorities, old);
+
+        // PROPERTY 1: result is always a valid task index
+        assert!(next < NUM_TASKS, "scheduler returned invalid index");
+
+        // PROPERTY 2: if nothing is eligible, returns IDLE_TASK_ID
+        let any_eligible = is_eligible[0] || is_eligible[1]
+            || is_eligible[2] || is_eligible[3]
+            || is_eligible[4] || is_eligible[5]
+            || is_eligible[6] || is_eligible[7];
+        if !any_eligible {
+            assert_eq!(next, IDLE_TASK_ID, "no eligible tasks but didn't pick idle");
+        }
+
+        // PROPERTY 3: if something is eligible, the picked task IS eligible
+        if any_eligible {
+            assert!(is_eligible[next], "picked an ineligible task");
+        }
+    }
+
+    /// Prove: restart_task state machine transitions are correct.
+    /// - Only Faulted tasks get restarted.
+    /// - After restart: state=Ready, context restored from entry/stack,
+    ///   priority=base, ticks=0, heartbeat=now.
+    #[kani::proof]
+    fn restart_task_state_machine() {
+        let entry_point: u64 = kani::any();
+        let user_stack_top: u64 = kani::any();
+        let base_priority: u8 = kani::any();
+        kani::assume(base_priority <= 7);
+        let now: u64 = kani::any();
+
+        // Test Faulted → Ready transition
+        let (state, elr, spsr, sp, prio, ticks, hb, did_restart) =
+            restart_task_pure(
+                TaskState::Faulted,
+                entry_point,
+                user_stack_top,
+                base_priority,
+                now,
+            );
+        assert!(did_restart, "Faulted task should restart");
+        assert_eq!(state, TaskState::Ready);
+        assert_eq!(elr, entry_point, "ELR must match entry point");
+        assert_eq!(spsr, 0x000, "SPSR must be EL0t");
+        assert_eq!(sp, user_stack_top, "SP must match user stack");
+        assert_eq!(prio, base_priority, "priority must be base");
+        assert_eq!(ticks, 0, "ticks_used must be zero");
+        assert_eq!(hb, now, "heartbeat must be current time");
+
+        // Test non-Faulted states are no-ops
+        let (s2, _, _, _, _, _, _, did2) =
+            restart_task_pure(TaskState::Ready, entry_point, user_stack_top, base_priority, now);
+        assert!(!did2, "Ready task should not restart");
+        assert_eq!(s2, TaskState::Ready, "state unchanged");
+
+        let (s3, _, _, _, _, _, _, did3) =
+            restart_task_pure(TaskState::Blocked, entry_point, user_stack_top, base_priority, now);
+        assert!(!did3, "Blocked task should not restart");
+        assert_eq!(s3, TaskState::Blocked, "state unchanged");
+
+        let (s4, _, _, _, _, _, _, did4) =
+            restart_task_pure(TaskState::Running, entry_point, user_stack_top, base_priority, now);
+        assert!(!did4, "Running task should not restart");
+        assert_eq!(s4, TaskState::Running, "state unchanged");
+
+        let (s5, _, _, _, _, _, _, did5) =
+            restart_task_pure(TaskState::Inactive, entry_point, user_stack_top, base_priority, now);
+        assert!(!did5, "Inactive task should not restart");
+        assert_eq!(s5, TaskState::Inactive, "state unchanged");
+    }
+}

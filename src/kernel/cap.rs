@@ -171,3 +171,50 @@ pub fn cap_name(cap: CapBits) -> &'static str {
         _                 => "UNKNOWN",
     }
 }
+
+// ─── Kani formal verification proofs ───────────────────────────────
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Prove: cap_check is a pure bitwise AND — always consistent.
+    /// Property 1: cap_check(caps, 0) is always true (vacuous).
+    /// Property 2: cap_check(0, required) is false for any non-zero required.
+    /// Property 3: cap_check is exactly `(caps & required) == required`.
+    #[kani::proof]
+    fn cap_check_bitwise_correctness() {
+        let caps: u64 = kani::any();
+        let required: u64 = kani::any();
+
+        // Definitional equivalence
+        assert_eq!(cap_check(caps, required), (caps & required) == required);
+
+        // Vacuous truth: zero required always passes
+        assert!(cap_check(caps, 0));
+
+        // Zero caps fails for any non-zero required
+        if required != 0 {
+            assert!(!cap_check(0, required));
+        }
+    }
+
+    /// Prove: cap_for_syscall never panics and returns only valid cap bits.
+    /// For all valid syscall numbers (0..=12) and endpoints (0..=3),
+    /// the returned bitmask is a subset of CAP_ALL (0x3FFFF).
+    #[kani::proof]
+    fn cap_for_syscall_no_panic_and_bounded() {
+        let nr: u64 = kani::any();
+        let ep: u64 = kani::any();
+        kani::assume(nr <= 12);
+        kani::assume(ep <= 3);
+
+        let result = cap_for_syscall(nr, ep);
+
+        // Result must be a subset of defined capability bits
+        assert!(
+            result & !CAP_ALL == 0,
+            "cap_for_syscall returned bits outside CAP_ALL"
+        );
+    }
+}

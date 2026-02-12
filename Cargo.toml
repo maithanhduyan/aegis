@@ -5,6 +5,10 @@ edition = "2021"
 authors = ["AegisOS Team"]
 description = "Safety-critical AArch64 microkernel"
 
+# Allow cfg(kani) without warnings — used for Kani formal verification proofs
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [profile.release]
 panic = "abort"
 opt-level = "s"
