@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb-multiarch \
     # Misc
     sudo \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # ─── Non-root user ──────────────────────────────────────────────────
@@ -53,11 +54,21 @@ ENV PATH="/home/${USERNAME}/.cargo/bin:${PATH}"
 RUN cargo install --locked kani-verifier \
     && cargo kani setup
 
+# ─── Bun runtime (for VitePress docs) ──────────────────────────────
+RUN curl -fsSL https://bun.sh/install | bash
+
+ENV BUN_INSTALL="/home/${USERNAME}/.bun"
+ENV PATH="${BUN_INSTALL}/bin:${PATH}"
+
 # ─── Verify installation ───────────────────────────────────────────
 RUN rustc --version \
     && cargo --version \
     && cargo kani --version \
-    && qemu-system-aarch64 --version
+    && qemu-system-aarch64 --version \
+    && bun --version
+
+# ─── Expose VitePress dev server port ──────────────────────────────
+EXPOSE 5173
 
 # ─── Workspace ──────────────────────────────────────────────────────
 WORKDIR /workspaces/aegis
