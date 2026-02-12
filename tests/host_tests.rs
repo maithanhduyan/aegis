@@ -2647,3 +2647,574 @@ fn l6_elf_wxn_flag_properties() {
     );
     assert_eq!(result, Err(ElfLoadError::WxViolation));
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase M4: Targeted Coverage Tests
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── M4-IPC: sys_send / sys_recv / sys_call coverage ──────────────
+
+#[test]
+fn ipc_sys_send_immediate_delivery() {
+    // Receiver already waiting → message delivered immediately
+    unsafe {
+        reset_test_state();
+        // Task 1 is waiting to receive on EP0
+        ipc::ENDPOINTS[0].receiver = Some(1);
+        sched::TCBS[1].state = TaskState::Blocked;
+        // Set task 0 as current (sender), put message in its context
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[0].context.x[0] = 0xAAAA;
+        sched::TCBS[0].context.x[1] = 0xBBBB;
+        sched::TCBS[0].context.x[2] = 0xCCCC;
+        sched::TCBS[0].context.x[3] = 0xDDDD;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_send(&mut frame, 0);
+
+        // Receiver should have the message and be Ready
+        assert_eq!(sched::TCBS[1].context.x[0], 0xAAAA);
+        assert_eq!(sched::TCBS[1].context.x[1], 0xBBBB);
+        assert_eq!(sched::TCBS[1].context.x[2], 0xCCCC);
+        assert_eq!(sched::TCBS[1].context.x[3], 0xDDDD);
+        assert_eq!(sched::TCBS[1].state, TaskState::Ready);
+        // Receiver slot should be cleared
+        assert!(ipc::ENDPOINTS[0].receiver.is_none());
+    }
+}
+
+#[test]
+fn ipc_sys_send_blocks_when_no_receiver() {
+    // No receiver → sender enqueued and blocked
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[0].context.x[0] = 0x1234;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_send(&mut frame, 0);
+
+        // Sender should be blocked and in the queue
+        assert_eq!(sched::TCBS[0].state, TaskState::Blocked);
+        assert!(ipc::ENDPOINTS[0].sender_queue.contains(0));
+    }
+}
+
+#[test]
+fn ipc_sys_send_invalid_endpoint() {
+    // Invalid ep_id → no crash, no state change
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_send(&mut frame, 99); // invalid
+
+        // Should still be Running, no panic
+        assert_eq!(sched::TCBS[0].state, TaskState::Running);
+    }
+}
+
+#[test]
+fn ipc_sys_send_queue_full() {
+    // Sender queue full → early return, not blocked
+    unsafe {
+        reset_test_state();
+        // Fill sender queue with fake tasks
+        for i in 0..ipc::MAX_WAITERS {
+            ipc::ENDPOINTS[0].sender_queue.push(i);
+        }
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_send(&mut frame, 0);
+
+        // Should return without blocking (queue was full)
+        // State may be Running or Ready depending on schedule path
+        // The key is it didn't deadlock
+        assert!(sched::TCBS[0].state == TaskState::Running
+            || sched::TCBS[0].state == TaskState::Ready);
+    }
+}
+
+#[test]
+fn ipc_sys_recv_immediate_delivery() {
+    // Sender already waiting → message received immediately
+    unsafe {
+        reset_test_state();
+        // Task 0 is a sender queued on EP0 with a message
+        sched::TCBS[0].state = TaskState::Blocked;
+        sched::TCBS[0].context.x[0] = 0xFEED;
+        sched::TCBS[0].context.x[1] = 0xBEEF;
+        ipc::ENDPOINTS[0].sender_queue.push(0);
+
+        // Task 1 calls recv
+        sched::CURRENT = 1;
+        sched::TCBS[1].state = TaskState::Running;
+        let mut frame = core::ptr::read(&sched::TCBS[1].context);
+        ipc::sys_recv(&mut frame, 0);
+
+        // Sender should be unblocked
+        assert_eq!(sched::TCBS[0].state, TaskState::Ready);
+        // Receiver should have the message (loaded into frame and TCB)
+        assert_eq!(sched::TCBS[1].context.x[0], 0xFEED);
+        assert_eq!(sched::TCBS[1].context.x[1], 0xBEEF);
+        // Queue should be empty
+        assert_eq!(ipc::ENDPOINTS[0].sender_queue.count, 0);
+    }
+}
+
+#[test]
+fn ipc_sys_recv_blocks_when_no_sender() {
+    // No sender → receiver blocks
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 1;
+        sched::TCBS[1].state = TaskState::Running;
+
+        let mut frame = core::ptr::read(&sched::TCBS[1].context);
+        ipc::sys_recv(&mut frame, 0);
+
+        // Receiver should be blocked and registered
+        assert_eq!(sched::TCBS[1].state, TaskState::Blocked);
+        assert_eq!(ipc::ENDPOINTS[0].receiver, Some(1));
+    }
+}
+
+#[test]
+fn ipc_sys_recv_invalid_endpoint() {
+    // Invalid ep_id → no crash
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_recv(&mut frame, 99);
+
+        assert_eq!(sched::TCBS[0].state, TaskState::Running);
+    }
+}
+
+#[test]
+fn ipc_sys_call_with_receiver_waiting() {
+    // Receiver waiting → deliver message, caller blocks as new receiver
+    unsafe {
+        reset_test_state();
+        // Task 1 is waiting to receive on EP0
+        ipc::ENDPOINTS[0].receiver = Some(1);
+        sched::TCBS[1].state = TaskState::Blocked;
+
+        // Task 0 calls sys_call (send + recv)
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[0].context.x[0] = 0xCAFE;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_call(&mut frame, 0);
+
+        // Message delivered to task 1
+        assert_eq!(sched::TCBS[1].context.x[0], 0xCAFE);
+        // Task 1 is Ready or Running (schedule may have picked it)
+        assert!(sched::TCBS[1].state == TaskState::Ready
+            || sched::TCBS[1].state == TaskState::Running);
+
+        // Caller (task 0) should now be receiver, blocked
+        assert_eq!(sched::TCBS[0].state, TaskState::Blocked);
+        assert_eq!(ipc::ENDPOINTS[0].receiver, Some(0));
+    }
+}
+
+#[test]
+fn ipc_sys_call_no_receiver() {
+    // No receiver → enqueue as sender, block
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[0].context.x[0] = 0x9999;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_call(&mut frame, 0);
+
+        // Should be blocked, enqueued as sender
+        assert_eq!(sched::TCBS[0].state, TaskState::Blocked);
+        assert!(ipc::ENDPOINTS[0].sender_queue.contains(0));
+    }
+}
+
+#[test]
+fn ipc_sys_call_invalid_endpoint() {
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_call(&mut frame, 99);
+
+        assert_eq!(sched::TCBS[0].state, TaskState::Running);
+    }
+}
+
+#[test]
+fn ipc_sys_call_queue_full() {
+    // Queue full when no receiver → sender can't enqueue
+    unsafe {
+        reset_test_state();
+        for i in 0..ipc::MAX_WAITERS {
+            ipc::ENDPOINTS[0].sender_queue.push(i);
+        }
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_call(&mut frame, 0);
+
+        // Should not deadlock — early return
+        assert!(sched::TCBS[0].state == TaskState::Running
+            || sched::TCBS[0].state == TaskState::Ready);
+    }
+}
+
+#[test]
+fn ipc_sys_call_priority_boost() {
+    // High-priority caller → receiver gets boosted
+    unsafe {
+        reset_test_state();
+        // Task 0 = high priority (7), task 1 = low priority (2)
+        sched::TCBS[0].priority = 7;
+        sched::TCBS[0].base_priority = 7;
+        sched::TCBS[1].priority = 2;
+        sched::TCBS[1].base_priority = 2;
+
+        // Task 1 is waiting to receive
+        ipc::ENDPOINTS[0].receiver = Some(1);
+        sched::TCBS[1].state = TaskState::Blocked;
+
+        // Task 0 calls (sends + waits for reply)
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[0].context.x[0] = 0x42;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_call(&mut frame, 0);
+
+        // Task 1 should have been boosted to priority 7
+        assert_eq!(sched::TCBS[1].priority, 7);
+        // Task 1's base priority unchanged
+        assert_eq!(sched::TCBS[1].base_priority, 2);
+    }
+}
+
+#[test]
+fn ipc_send_restores_receiver_priority() {
+    // After send delivers message, receiver's base priority is restored
+    unsafe {
+        reset_test_state();
+        // Receiver was boosted from previous call
+        sched::TCBS[1].priority = 7;
+        sched::TCBS[1].base_priority = 2;
+        ipc::ENDPOINTS[0].receiver = Some(1);
+        sched::TCBS[1].state = TaskState::Blocked;
+
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[0].context.x[0] = 0x55;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_send(&mut frame, 0);
+
+        // sys_send calls restore_base_priority on receiver
+        assert_eq!(sched::TCBS[1].priority, 2);
+    }
+}
+
+// ─── M4-SCHED: fault_current_task + edge cases ───────────────────
+
+#[test]
+fn sched_fault_current_task_basic() {
+    // fault_current_task: marks task Faulted, records fault_tick, cleans up IPC/grant/IRQ
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[0].priority = 5;
+        sched::TCBS[0].base_priority = 3;
+        aegis_os::timer::TICK_COUNT = 42;
+
+        // Task 0 is receiver on EP0
+        ipc::ENDPOINTS[0].receiver = Some(0);
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        sched::fault_current_task(&mut frame);
+
+        // Task should be Faulted
+        assert_eq!(sched::TCBS[0].state, TaskState::Faulted);
+        // Fault tick recorded
+        assert_eq!(sched::TCBS[0].fault_tick, 42);
+        // Priority restored to base
+        assert_eq!(sched::TCBS[0].priority, 3);
+        // IPC cleanup: receiver slot cleared
+        assert!(ipc::ENDPOINTS[0].receiver.is_none());
+        // Should have scheduled away (CURRENT changed)
+        assert_ne!(read_current(), 0);
+    }
+}
+
+#[test]
+fn sched_fault_current_task_cleans_irq() {
+    // fault_current_task cleans up IRQ bindings
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+
+        // Bind an IRQ (INTID 33) to task 0
+        let r = irq::irq_bind(33, 0, 1);
+        assert_eq!(r, 0); // sanity: bind succeeds
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        sched::fault_current_task(&mut frame);
+
+        // IRQ binding should be cleaned up
+        // Verify by trying to rebind same INTID for task 1 (should succeed)
+        let result = irq::irq_bind(33, 1, 1);
+        assert_eq!(result, 0); // success = binding was freed
+    }
+}
+
+#[test]
+fn sched_restart_task_non_faulted_noop() {
+    // restart_task on a Ready task → no-op (early return)
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].state = TaskState::Ready;
+        sched::TCBS[0].context.x[5] = 0xDEAD;
+
+        sched::restart_task(0);
+
+        // Should not have changed — it was Ready, not Faulted
+        assert_eq!(sched::TCBS[0].state, TaskState::Ready);
+        assert_eq!(sched::TCBS[0].context.x[5], 0xDEAD);
+    }
+}
+
+#[test]
+fn sched_schedule_no_ready_task_forces_idle() {
+    // All tasks blocked/faulted → scheduler forces idle (task 2) Ready
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[1].state = TaskState::Blocked;
+        sched::TCBS[2].state = TaskState::Blocked;
+
+        // Set budgets: task 0 has exhausted budget
+        sched::TCBS[0].time_budget = 10;
+        sched::TCBS[0].ticks_used = 10;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        sched::schedule(&mut frame);
+
+        // Should fallback to idle (task 2), forced Ready → Running
+        assert_eq!(read_current(), 2);
+        assert_eq!(sched::TCBS[2].state, TaskState::Running);
+    }
+}
+
+#[test]
+fn sched_schedule_idle_faulted_gets_restarted() {
+    // Idle (task 2) is Faulted → schedule forces restart + runs it
+    unsafe {
+        reset_test_state();
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[0].time_budget = 10;
+        sched::TCBS[0].ticks_used = 10;
+        sched::TCBS[1].state = TaskState::Blocked;
+        sched::TCBS[2].state = TaskState::Faulted;
+        sched::TCBS[2].fault_tick = 0;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        sched::schedule(&mut frame);
+
+        // Idle should be forced Ready → Running
+        assert_eq!(read_current(), 2);
+        assert_eq!(sched::TCBS[2].state, TaskState::Running);
+    }
+}
+
+#[test]
+fn sched_get_task_priority_out_of_range() {
+    // Out-of-range task_idx → returns 0
+    assert_eq!(sched::get_task_priority(99), 0);
+}
+
+#[test]
+fn sched_get_task_base_priority_out_of_range() {
+    assert_eq!(sched::get_task_base_priority(99), 0);
+}
+
+#[test]
+fn sched_set_task_priority_out_of_range() {
+    // Should be no-op
+    unsafe {
+        reset_test_state();
+        let old_prio = sched::TCBS[0].priority;
+        sched::set_task_priority(99, 7);
+        // No crash, task 0 unchanged
+        assert_eq!(sched::TCBS[0].priority, old_prio);
+    }
+}
+
+#[test]
+fn sched_restore_base_priority_out_of_range() {
+    // Should be no-op, no crash
+    sched::restore_base_priority(99);
+}
+
+#[test]
+fn sched_set_task_state_out_of_range() {
+    // No crash on out-of-range
+    sched::set_task_state(99, TaskState::Blocked);
+}
+
+// ─── M4-CAP: Complete cap_name coverage ───────────────────────────
+
+#[test]
+fn cap_name_all_missing_arms() {
+    // Cover the 7 cap_name match arms missed by existing tests
+    assert_eq!(cap::cap_name(CAP_IPC_SEND_EP1), "IPC_SEND_EP1");
+    assert_eq!(cap::cap_name(CAP_IPC_RECV_EP1), "IPC_RECV_EP1");
+    assert_eq!(cap::cap_name(CAP_GRANT_CREATE), "GRANT_CREATE");
+    assert_eq!(cap::cap_name(CAP_GRANT_REVOKE), "GRANT_REVOKE");
+    assert_eq!(cap::cap_name(CAP_IRQ_BIND), "IRQ_BIND");
+    assert_eq!(cap::cap_name(CAP_IRQ_ACK), "IRQ_ACK");
+    assert_eq!(cap::cap_name(CAP_DEVICE_MAP), "DEVICE_MAP");
+    assert_eq!(cap::cap_name(CAP_HEARTBEAT), "HEARTBEAT");
+}
+
+#[test]
+fn cap_for_syscall_all_endpoints() {
+    // Exhaustive test for all 4 endpoints × send/recv
+    use aegis_os::cap::cap_for_syscall;
+    // EP0
+    assert_eq!(cap_for_syscall(1, 0), CAP_IPC_SEND_EP0);
+    assert_eq!(cap_for_syscall(2, 0), CAP_IPC_RECV_EP0);
+    // EP1
+    assert_eq!(cap_for_syscall(1, 1), CAP_IPC_SEND_EP1);
+    assert_eq!(cap_for_syscall(2, 1), CAP_IPC_RECV_EP1);
+    // EP2
+    assert_eq!(cap_for_syscall(1, 2), CAP_IPC_SEND_EP2);
+    assert_eq!(cap_for_syscall(2, 2), CAP_IPC_RECV_EP2);
+    // EP3
+    assert_eq!(cap_for_syscall(1, 3), CAP_IPC_SEND_EP3);
+    assert_eq!(cap_for_syscall(2, 3), CAP_IPC_RECV_EP3);
+    // CALL = send + recv combined
+    assert_eq!(cap_for_syscall(3, 0), CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0);
+    assert_eq!(cap_for_syscall(3, 1), CAP_IPC_SEND_EP1 | CAP_IPC_RECV_EP1);
+    assert_eq!(cap_for_syscall(3, 2), CAP_IPC_SEND_EP2 | CAP_IPC_RECV_EP2);
+    assert_eq!(cap_for_syscall(3, 3), CAP_IPC_SEND_EP3 | CAP_IPC_RECV_EP3);
+}
+
+#[test]
+fn cap_for_syscall_grant_irq_device() {
+    use aegis_os::cap::cap_for_syscall;
+    assert_eq!(cap_for_syscall(7, 0), CAP_GRANT_CREATE);
+    assert_eq!(cap_for_syscall(8, 0), CAP_GRANT_REVOKE);
+    assert_eq!(cap_for_syscall(9, 0), CAP_IRQ_BIND);
+    assert_eq!(cap_for_syscall(10, 0), CAP_IRQ_ACK);
+    assert_eq!(cap_for_syscall(11, 0), CAP_DEVICE_MAP);
+    assert_eq!(cap_for_syscall(12, 0), CAP_HEARTBEAT);
+}
+
+// ─── M4-GRANT: edge cases ─────────────────────────────────────────
+
+#[test]
+fn grant_cleanup_clears_both_roles() {
+    // If task is both owner and peer of different grants, both cleaned
+    unsafe {
+        reset_test_state();
+        // Grant 0: task 0 owns, task 1 is peer
+        grant::grant_create(0, 0, 1);
+        // Grant 1: task 1 owns, task 0 is peer
+        grant::grant_create(1, 1, 0);
+
+        // Clean up task 0
+        grant::cleanup_task(0);
+
+        // Grant 0 should be deactivated (task 0 was owner)
+        assert!(!grant::GRANTS[0].active);
+        // Grant 1 should be deactivated (task 0 was peer)
+        assert!(!grant::GRANTS[1].active);
+    }
+}
+
+// ─── M4-TIMER: tick_count accessor ────────────────────────────────
+
+#[test]
+fn timer_tick_count_accessor() {
+    unsafe {
+        reset_test_state();
+        aegis_os::timer::TICK_COUNT = 0;
+        assert_eq!(aegis_os::timer::tick_count(), 0);
+        aegis_os::timer::TICK_COUNT = 12345;
+        assert_eq!(aegis_os::timer::tick_count(), 12345);
+    }
+}
+
+// ─── M4-IPC: Round-trip send→recv message integrity ───────────────
+
+#[test]
+fn ipc_round_trip_message_integrity() {
+    // Full round-trip: task 0 sends, task 1 receives — all 4 regs match
+    unsafe {
+        reset_test_state();
+        // Task 1 is waiting on EP0
+        ipc::ENDPOINTS[0].receiver = Some(1);
+        sched::TCBS[1].state = TaskState::Blocked;
+
+        // Task 0 sends specific message
+        sched::CURRENT = 0;
+        sched::TCBS[0].state = TaskState::Running;
+        sched::TCBS[0].context.x[0] = 0x1111_1111_AAAA_BBBB;
+        sched::TCBS[0].context.x[1] = 0x2222_2222_CCCC_DDDD;
+        sched::TCBS[0].context.x[2] = 0x3333_3333_EEEE_FFFF;
+        sched::TCBS[0].context.x[3] = 0x4444_4444_0000_1111;
+
+        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        ipc::sys_send(&mut frame, 0);
+
+        assert_eq!(sched::TCBS[1].context.x[0], 0x1111_1111_AAAA_BBBB);
+        assert_eq!(sched::TCBS[1].context.x[1], 0x2222_2222_CCCC_DDDD);
+        assert_eq!(sched::TCBS[1].context.x[2], 0x3333_3333_EEEE_FFFF);
+        assert_eq!(sched::TCBS[1].context.x[3], 0x4444_4444_0000_1111);
+    }
+}
+
+#[test]
+fn ipc_recv_loads_frame_on_immediate() {
+    // When recv finds a waiting sender, it loads message into the frame
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].state = TaskState::Blocked;
+        sched::TCBS[0].context.x[0] = 0xABCD;
+        sched::TCBS[0].context.x[1] = 0xEF01;
+        ipc::ENDPOINTS[0].sender_queue.push(0);
+
+        sched::CURRENT = 1;
+        sched::TCBS[1].state = TaskState::Running;
+        let mut frame = core::ptr::read(&sched::TCBS[1].context);
+        ipc::sys_recv(&mut frame, 0);
+
+        // Frame should be updated (load_frame loads from TCB into frame)
+        // The TCB should have the message
+        assert_eq!(sched::TCBS[1].context.x[0], 0xABCD);
+        assert_eq!(sched::TCBS[1].context.x[1], 0xEF01);
+    }
+}
