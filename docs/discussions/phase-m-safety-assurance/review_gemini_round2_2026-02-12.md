@@ -154,7 +154,7 @@ Data này **confirm stance Round 1**: TCBS và ENDPOINTS là hai biến phức t
 - **Bước 2** (Phase M, tuần 3): Encapsulate `CURRENT` + `EPOCH_TICKS`. Scalar values, `read_current()` helper trong tests đã wrap `CURRENT` access → migration dễ hơn. **~5-6h.**
 - **Bước 3** (Phase N): Encapsulate `TCBS` + `ENDPOINTS` + `GRANTS` + `IRQ_BINDINGS`. Defer vì: (a) ~55+ test references phải sửa, (b) struct field access cần careful API design, (c) interrupt context concerns cho TCBS. **~15-20h khi API stable hơn.**
 
-**Về KernelCell<T> vs alternative:** Tôi không phản đối `KernelCell<T>` pattern cụ thể — zero-cost abstraction trên `UnsafeCell<T>` là hợp lý. Tôi chỉ yêu cầu: (a) validate trên biến đơn giản trước, (b) document pattern rõ ràng trước khi scale, (c) mỗi bước verify 189 tests.
+**Về `KernelCell<T>` vs alternative:** Tôi không phản đối `KernelCell<T>` pattern cụ thể — zero-cost abstraction trên `UnsafeCell<T>` là hợp lý. Tôi chỉ yêu cầu: (a) validate trên biến đơn giản trước, (b) document pattern rõ ràng trước khi scale, (c) mỗi bước verify 189 tests.
 
 ---
 

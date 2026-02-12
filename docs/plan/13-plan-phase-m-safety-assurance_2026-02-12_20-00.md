@@ -518,7 +518,7 @@ Sau khi pilot thành công, mở rộng sang:
 | **IEC 62304** | §7 | Software maintenance — no SOUP, all static (maintained by M1 audit) |
 | **ISO 26262** | Part 6 §9.4.3 | Sufficient diagnostic info — enhanced panic handler (M3) |
 | **ISO 26262** | Part 6 §7.4.12 | WCET analysis — defer Phase R+ (requires cycle counting) |
-| **ISO 26262** | Part 11 | Multi-core (tương lai) — KernelCell<T> pattern chuẩn bị cho multi-core |
+| **ISO 26262** | Part 11 | Multi-core (tương lai) — `KernelCell<T>` pattern chuẩn bị cho multi-core |
 
 ---
 
