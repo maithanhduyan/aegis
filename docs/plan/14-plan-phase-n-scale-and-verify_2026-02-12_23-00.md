@@ -1,6 +1,6 @@
 # Kế hoạch Phase N — Scale & Verify
 
-> **Trạng thái: 📋 DRAFT** — Mở rộng AegisOS từ 3 lên 8 tasks, pilot formal verification với Kani, encapsulate 4 struct-array globals còn lại vào `KernelCell<T>`. Phase này vừa thêm tính năng (scale) vừa tăng cường safety (verify) — cân bằng giữa development velocity và assurance depth.
+> **Trạng thái: ✅ DONE** — Mở rộng AegisOS từ 3 lên 8 tasks, pilot formal verification với Kani, encapsulate 4 struct-array globals còn lại vào `KernelCell<T>`. Phase này vừa thêm tính năng (scale) vừa tăng cường safety (verify) — cân bằng giữa development velocity và assurance depth.
 >
 > **Đồng thuận:** Cập nhật theo [final consensus](../discussions/phase-n-scale-and-verify/final_consensus_2026-02-12.md) — 2 rounds, 13/13 điểm đồng thuận (100%).
 
@@ -574,12 +574,12 @@ Kani verification: 4 proofs, 0 failures
 
 1. [x] Review kế hoạch Phase N → [final consensus](../discussions/phase-n-scale-and-verify/final_consensus_2026-02-12.md) (13/13 đồng thuận)
 2. [x] Verify `EMPTY_TCB` là `pub const` — ✅ const-constructible
-3. [ ] Triển khai N1a: Constants + Linker (handoff → Aegis-Agent)
-4. [ ] Triển khai N1b: MMU computed indexing
-5. [ ] Triển khai N1c: `TaskMetadata` hybrid + loop init
-6. [ ] Triển khai N1d: Host stubs + test updates + Option C validation
-7. [ ] Triển khai N2: `kcell_index!()` macro + wrap 4 globals (GRANTS → IRQ → ENDPOINTS → TCBS)
-8. [ ] Triển khai N3: Kani setup + 4 proof harnesses
+3. [x] Triển khai N1a: Constants + Linker — ✅ `IDLE_TASK_ID`, `PageTableType`, `pt_index()`, computed `NUM_PAGE_TABLE_PAGES` (commit fadbdc7)
+4. [x] Triển khai N1b: MMU computed indexing — ✅ all `PT_*+task_id` → `pt_index()`, loops/guards parameterized
+5. [x] Triển khai N1c: `TaskMetadata` hybrid + loop init — ✅ `TaskMetadata` struct, `sched::init(&[u64; NUM_TASKS])`, `TASK_META` const array
+6. [x] Triển khai N1d: Host stubs + test updates + Option C validation — ✅ 220 tests + 28 QEMU at NUM_TASKS=3, then flipped to 8
+7. [x] Triển khai N2: `kcell_index!()` macro + wrap 4 globals (GRANTS → IRQ → ENDPOINTS → TCBS) — ✅ 0 `static mut` remaining (commit 7cd1daa)
+8. [x] Triển khai N3: Kani proof harnesses — ✅ 6 properties in 4 files: pt_index bounds+aliasing, cap_check bitwise, cap_for_syscall bounded, schedule idle guarantee, restart state machine (commit d575021). Kani runs on Linux CI.
 9. [ ] Re-measure coverage → ≥ 95%
 10. [ ] Viết blog Phase N giải thích (handoff → Aegis-StoryTeller)
 11. [ ] Chuẩn bị Phase O roadmap
