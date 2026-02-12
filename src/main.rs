@@ -25,7 +25,7 @@ use aegis_os::gic;
 
 // Boot assembly — inline vào binary thông qua global_asm!
 #[cfg(target_arch = "aarch64")]
-core::arch::global_asm!(include_str!("boot.s"));
+core::arch::global_asm!(include_str!("arch/aarch64/boot.s"));
 
 // ─── Syscall wrappers ──────────────────────────────────────────────
 
@@ -448,6 +448,9 @@ pub extern "C" fn kernel_main() -> ! {
         sched::TCBS[2].ttbr0 = mmu::ttbr0_for_task(2, 3);
     }
     uart_print("[AegisOS] per-task address spaces assigned\n");
+
+    // ─── Phase L1: Arch separation ─────────────────────────────────
+    uart_print("[AegisOS] arch separation: module tree ready\n");
 
     timer::init(10);
 

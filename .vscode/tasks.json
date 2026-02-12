@@ -1,0 +1,13 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "VitePress Dev",
+            "type": "shell",
+            "command": "npm run docs:dev",
+            "options": {
+                "cwd": "docs/"
+            }
+        },
+    ]
+}
