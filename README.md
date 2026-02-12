@@ -10,19 +10,28 @@ AegisOS is a `#![no_std]` Rust microkernel targeting QEMU `virt` machine (Cortex
 
 ## ✨ Features
 
-| Feature | Status | Description |
-|---|---|---|
-| AArch64 boot | ✅ | EL2 → EL1 drop, BSS clear, stack setup |
-| MMU + W^X | ✅ | Identity-mapped page tables (L1→L2→L3, 4KB pages), WXN enforced |
-| GICv2 | ✅ | Interrupt controller driver (GICD + GICC) |
-| Generic Timer | ✅ | ARM CNTP_EL0, 10ms tick, INTID 30 |
-| Round-robin Scheduler | ✅ | 3 static tasks, preemptive via timer, context switch through TrapFrame |
-| User/Kernel Separation | ✅ | Tasks run at EL0, kernel at EL1, AP-bit isolation |
-| Synchronous IPC | ✅ | Blocking send/recv on endpoints, 4-word messages |
-| Fault Isolation | ✅ | EL0 faults → task killed + auto-restart (1s delay), kernel keeps running |
-| Capability Access Control | ✅ | Per-task bitmask, least-privilege enforcement on every syscall |
-| Test Infrastructure | ✅ | 69 host unit tests + 10 QEMU boot checkpoints |
-| CI/CD | ✅ | GitHub Actions — host tests + QEMU integration on every push |
+| Feature | Status | Phase | Description |
+|---|---|---|---|
+| AArch64 boot | ✅ | A | EL2 → EL1 drop, BSS clear, stack setup |
+| MMU + W^X | ✅ | B | Identity-mapped page tables (L1→L2→L3, 4KB pages), WXN enforced |
+| GICv2 | ✅ | C | Interrupt controller driver (GICD + GICC) |
+| Generic Timer | ✅ | C | ARM CNTP_EL0, 10ms tick, INTID 30 |
+| Preemptive Scheduler | ✅ | C | 3 static tasks, round-robin + priority, context switch through TrapFrame |
+| User/Kernel Separation | ✅ | D | Tasks run at EL0, kernel at EL1, AP-bit isolation |
+| Fault Isolation | ✅ | E | EL0 faults → task killed + auto-restart (1s delay), kernel keeps running |
+| Synchronous IPC | ✅ | C | Blocking send/recv on 4 endpoints, 4-word messages |
+| Capability Access Control | ✅ | G | Per-task u64 bitmask (18 bits), least-privilege enforcement on every syscall |
+| Per-Task Address Space | ✅ | H | Per-task L3 page tables, ASID-tagged TTBR0 |
+| Async Notifications | ✅ | I | Bitmask notify/wait, non-blocking |
+| Shared Memory Grants | ✅ | J | Owner/peer grant pages, revocable |
+| IRQ Routing | ✅ | J | Bind GIC INTID → task notification bit |
+| User-Mode Driver | ✅ | J | UART driver runs at EL0 via MMIO map + IRQ |
+| Priority Scheduler | ✅ | K | 8-level priority, time budget, epoch reset |
+| Watchdog | ✅ | K | Heartbeat monitoring, fault on timeout |
+| Arch Separation | ✅ | L | `arch/aarch64/` + `kernel/` + `platform/` modular structure |
+| ELF64 Loader | ✅ | L | Parse + load ELF binaries, W^X enforced, `include_bytes!` embed |
+| Test Infrastructure | ✅ | F–L | 189 host unit tests + 25 QEMU boot checkpoints |
+| CI/CD | ✅ | F | GitHub Actions — host tests + QEMU integration on every push |
 
 ## 📐 Architecture
 
@@ -37,44 +46,69 @@ boot.s (_start)
         ├── GICv2 init
         ├── Scheduler init (3 tasks)
         ├── Capability assignment
+        ├── ELF load (user/hello binary → task slot)
         ├── Timer start (10ms tick)
-        └── bootstrap() ── ERET ──► task_a @ EL0
+        └── bootstrap() ── ERET ──► uart_driver @ EL0
                                       │
-                              ┌───────┴───────┐
-                              │               │
-                          task_a          task_b
-                         (PING)          (PONG)
-                          SVC #0          SVC #0
-                              │               │
-                              └───── IPC ──────┘
+                              ┌───────┴───────────────┐
+                              │           │           │
+                         task 0       task 1       task 2
+                       (UART drv)  (ELF hello)    (idle)
+                       prio=10     prio=5         prio=0
+                          SVC #0      SVC #0       SVC #0
+                              │           │           │
+                              └─── IPC + Notify ──────┘
 ```
 
 ### Source Layout
 
 ```
 src/
-├── boot.s          # Entry point, EL2→EL1, SP + BSS setup (inline via global_asm!)
-├── main.rs         # kernel_main(), syscall wrappers, EL0 task entries
-├── lib.rs          # Library crate — re-exports all modules for tests
-├── mmu.rs          # Page tables, identity map, W^X (WXN + AP bits)
-├── exception.rs    # Vector table, TrapFrame (288B ABI-locked), SVC dispatch
-├── gic.rs          # GICv2 driver (GICD 0x0800_0000, GICC 0x0801_0000)
-├── timer.rs        # ARM Generic Timer, 10ms tick, INTID 30
-├── sched.rs        # Round-robin scheduler, 3 static TCBs, fault/restart
-├── ipc.rs          # Synchronous endpoint IPC, blocking send/recv
-├── cap.rs          # Capability-based access control (u64 bitmask per task)
-└── uart.rs         # PL011 UART driver (0x0900_0000)
+├── arch/
+│   ├── mod.rs              # cfg(aarch64) → pub use aarch64 as current
+│   └── aarch64/
+│       ├── mod.rs           # Re-exports all arch modules
+│       ├── boot.s           # Entry point, EL2→EL1, SP + BSS setup
+│       ├── exception.rs     # Vector table, TrapFrame (288B), SVC dispatch
+│       ├── mmu.rs           # Page tables, identity map, W^X (WXN + AP bits)
+│       └── gic.rs           # GICv2 driver (GICD + GICC)
+│
+├── kernel/
+│   ├── mod.rs               # Re-exports all kernel modules
+│   ├── sched.rs             # Priority scheduler, 3 TCBs, budget, watchdog
+│   ├── ipc.rs               # Synchronous endpoint IPC, blocking send/recv
+│   ├── cap.rs               # Capability access control (u64 bitmask, 18 bits)
+│   ├── timer.rs             # Tick counter + tick handler logic
+│   ├── grant.rs             # Shared memory grants (owner/peer)
+│   ├── irq.rs               # IRQ binding + routing → notification
+│   └── elf.rs               # ELF64 parser + loader (no heap)
+│
+├── platform/
+│   ├── mod.rs               # Platform module gate
+│   └── qemu_virt.rs         # MMIO addresses, memory map constants
+│
+├── main.rs                  # kernel_main(), 13 syscall wrappers, task entries
+├── lib.rs                   # Crate root — module tree + re-exports
+├── exception.rs             # Host-only stub (x86_64 tests)
+├── mmu.rs                   # Host-only stub (x86_64 tests)
+└── uart.rs                  # PL011 UART (dual cfg: real HW + host stub)
+
+user/
+└── hello/                   # Standalone EL0 user task (ELF binary)
+    ├── Cargo.toml           # no_std, no_main, panic=abort
+    ├── src/main.rs          # Entry + syscall wrappers
+    └── link.ld              # User-space linker script
 
 tests/
-├── host_tests.rs       # 69 unit tests (x86_64, pure logic)
-├── qemu_boot_test.sh   # QEMU integration test (Linux/CI)
-└── qemu_boot_test.ps1  # QEMU integration test (Windows)
+├── host_tests.rs            # 189 unit tests (x86_64, pure logic)
+├── qemu_boot_test.sh        # QEMU integration (Linux/CI) — 25 checkpoints
+└── qemu_boot_test.ps1       # QEMU integration (Windows) — 25 checkpoints
 
 docs/
-├── blog/           # 7 articles explaining OS concepts (Vietnamese, for kids)
-├── plan/           # Phase plans (A through G)
-├── standard/       # DO-178C, IEC 62304, ISO 26262 references
-└── test/report/    # Test reports
+├── blog/                    # 12 articles explaining OS concepts (Vietnamese, for kids)
+├── plan/                    # Phase plans (A through L)
+├── standard/                # DO-178C, IEC 62304, ISO 26262 references
+└── test/report/             # Test reports
 ```
 
 ## 🔧 Build & Run
@@ -127,7 +161,7 @@ Press `Ctrl+A`, then `X` to exit QEMU.
 
 ## 🧪 Testing
 
-### Host Unit Tests (69 tests)
+### Host Unit Tests (189 tests)
 
 Pure-logic tests running on x86_64 — no QEMU needed:
 
@@ -144,11 +178,21 @@ cargo test --target x86_64-pc-windows-msvc --lib --test host_tests -- --test-thr
 | TrapFrame Layout | 4 | Size (288B), alignment, field offsets matching assembly |
 | MMU Descriptors | 18 | Bit composition, W^X invariants, AP permissions, XN, AF |
 | SYS_WRITE Validation | 12 | Pointer range checks, boundary, overflow, null |
-| Scheduler | 11 | Round-robin, skip Faulted/Blocked, auto-restart timing |
-| IPC | 10 | Endpoint cleanup, message copy, blocking states |
-| Capabilities | 14 | Bit checks, syscall mapping, least-privilege enforcement |
+| Scheduler | 30 | Priority, round-robin, budget, epoch, watchdog, fault/restart |
+| IPC | 14 | Endpoint cleanup, message copy, sender queue FIFO, blocking |
+| Capabilities | 18 | Bit checks, syscall mapping (0–12), least-privilege |
+| Notifications | 7 | Pending bits, merge, wait flag, restart clear |
+| Grants | 14 | Create, revoke, cleanup, page addr, re-create |
+| IRQ Routing | 12 | Bind, ack, route, cleanup, rebind, accumulate |
+| Per-Task Address Space | 10 | ASID, TTBR0, page table base, schedule preserve |
+| Device Map | 4 | Valid/invalid task/device, UART L2 index |
+| ELF Parser | 14 | Magic, class, arch, segments, bounds, entry point |
+| ELF Loader | 5 | Segment copy, BSS zero, validate, W^X permissions |
+| Page Table Constants | 1 | Phase J table constants |
+| L6 Integration | 6 | Arch module, kernel exports, platform, cfg separation |
+| **Total** | **189** | |
 
-### QEMU Boot Integration (10 checkpoints)
+### QEMU Boot Integration (25 checkpoints)
 
 ```bash
 # Linux
@@ -158,11 +202,21 @@ bash tests/qemu_boot_test.sh
 .\tests\qemu_boot_test.ps1
 ```
 
+| # | Checkpoint | Phase |
+|---|---|---|
+| 1–6 | Kernel boot, MMU, W^X, exceptions, scheduler, capabilities | A–G |
+| 7–9 | Priority scheduler, time budget, watchdog | K |
+| 10–14 | Notification, grant, IRQ routing, device MMIO, address spaces | H–J |
+| 15–16 | Arch separation L1, L2 | L |
+| 17–19 | ELF parser, loader, task loaded | L |
+| 20 | L5 ELF binary loaded | L |
+| 21–25 | Timer, bootstrap EL0, UART driver, ELF task output, client | A–L |
+
 ### CI
 
 GitHub Actions runs both test suites on every push to `main`/`develop`:
-- **Host Unit Tests** — `x86_64-unknown-linux-gnu`
-- **QEMU Boot Test** — Build AArch64 kernel + verify 10 boot checkpoints
+- **Host Unit Tests** — `x86_64-unknown-linux-gnu` (189 tests)
+- **QEMU Boot Test** — Build AArch64 kernel + verify 25 boot checkpoints
 
 ## 🗺️ Memory Map (QEMU virt)
 
@@ -182,13 +236,21 @@ GitHub Actions runs both test suites on every push to `main`/`develop`:
 | `x6` | Endpoint ID (for IPC) |
 | `x0`–`x3` | Message payload |
 
-| # | Syscall | Description |
-|---|---|---|
-| 0 | `SYS_YIELD` | Voluntarily yield CPU |
-| 1 | `SYS_SEND` | Send message on endpoint |
-| 2 | `SYS_RECV` | Receive (blocking) from endpoint |
-| 3 | `SYS_CALL` | Send + wait for reply (SEND + RECV) |
-| 4 | `SYS_WRITE` | Write byte to UART |
+| # | Syscall | Description | Phase |
+|---|---|---|---|
+| 0 | `SYS_YIELD` | Voluntarily yield CPU | C |
+| 1 | `SYS_SEND` | Send message on endpoint | C |
+| 2 | `SYS_RECV` | Receive (blocking) from endpoint | C |
+| 3 | `SYS_CALL` | Send + wait for reply (SEND + RECV) | C |
+| 4 | `SYS_WRITE` | Write string to UART | D |
+| 5 | `SYS_NOTIFY` | Send notification bitmask to task | I |
+| 6 | `SYS_WAIT_NOTIFY` | Block until notification arrives | I |
+| 7 | `SYS_GRANT_CREATE` | Create shared memory grant | J |
+| 8 | `SYS_GRANT_REVOKE` | Revoke shared memory grant | J |
+| 9 | `SYS_IRQ_BIND` | Bind IRQ INTID → notification bit | J |
+| 10 | `SYS_IRQ_ACK` | Acknowledge IRQ, re-enable INTID | J |
+| 11 | `SYS_DEVICE_MAP` | Map device MMIO into user-space | J |
+| 12 | `SYS_HEARTBEAT` | Register/refresh watchdog heartbeat | K |
 
 ## 🛡️ Design Constraints
 
@@ -198,7 +260,7 @@ GitHub Actions runs both test suites on every push to `main`/`develop`:
 - **W^X everywhere.** No page is both writable and executable.
 - **Capability-enforced.** Every syscall is checked against the task's capability bitmask before dispatch.
 
-## 📚 Blog Series (Vietnamese)
+## 📚 Blog Series (Vietnamese, 12 articles)
 
 Explanations of OS concepts written for 5th-graders — making kernel development accessible:
 
@@ -213,6 +275,7 @@ Explanations of OS concepts written for 5th-graders — making kernel developmen
 9. [Chuông cửa và hàng đợi — Nói chuyện không cần chờ](docs/blog/09-chuong-cua-va-hang-doi-noi-chuyen-khong-can-cho.md)
 10. [Khi chương trình tự nói chuyện với phần cứng](docs/blog/10-khi-chuong-trinh-tu-noi-chuyen-voi-phan-cung.md)
 11. [Ai được chạy trước? Và ai canh gác?](docs/blog/11-ai-duoc-chay-truoc-va-ai-canh-gac.md)
+12. [Dọn Nhà Và Đọc Sách Mục Lục — Arch Separation & ELF Loading](docs/blog/12-don-nha-va-doc-sach-muc-luc.md)
 
 ## 📜 Safety Standards Reference
 

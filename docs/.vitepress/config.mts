@@ -40,6 +40,7 @@ export default defineConfig({
             { text: '#09 — Chuông Cửa & Hàng Đợi', link: '/blog/09-chuong-cua-va-hang-doi-noi-chuyen-khong-can-cho' },
             { text: '#10 — User-Mode Driver', link: '/blog/10-khi-chuong-trinh-tu-noi-chuyen-voi-phan-cung' },
             { text: '#11 — Priority Scheduler & Watchdog', link: '/blog/11-ai-duoc-chay-truoc-va-ai-canh-gac' },
+            { text: '#12 — Arch Separation & ELF Loading', link: '/blog/12-don-nha-va-doc-sach-muc-luc' },
           ],
         },
       ],

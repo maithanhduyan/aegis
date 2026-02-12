@@ -1,6 +1,6 @@
 # Kế hoạch Phase L — Tách Arch + ELF Loader
 
-> **Trạng thái: � IN PROGRESS (L1 ✅ L2 ✅ L3 ✅)** — Tái cấu trúc codebase thành `arch/aarch64/` + `kernel/` + `platform/` để tách biệt code phụ thuộc kiến trúc khỏi logic portable, sau đó xây dựng ELF64 parser + loader để load task từ binary thay vì hardcode trong kernel. Đây là bước nền tảng để AegisOS hướng tới portability (RISC-V tương lai) và modularity (yêu cầu DO-178C/IEC 62304).
+> **Trạng thái: ✅ COMPLETE (L1–L6 ✅, blog ✅, test ✅, docs ✅)** — Tái cấu trúc codebase thành `arch/aarch64/` + `kernel/` + `platform/` để tách biệt code phụ thuộc kiến trúc khỏi logic portable, sau đó xây dựng ELF64 parser + loader để load task từ binary thay vì hardcode trong kernel. Đây là bước nền tảng để AegisOS hướng tới portability (RISC-V tương lai) và modularity (yêu cầu DO-178C/IEC 62304).
 
 ---
 
@@ -949,7 +949,7 @@ Bit 19–63:  Reserved (45–46 bits còn trống)
 5. [x] **Triển khai L4** (ELF Loader) — ✅ 183 tests + 23 QEMU checkpoints
 6. [x] **Triển khai L5** (Demo Binary) — ✅ 183 tests + 25 QEMU checkpoints
 7. [x] **Triển khai L6** (Tests) — ✅ 189 tests + 25 QEMU checkpoints
-8. [ ] **Viết blog #12** — giải thích arch separation + ELF loading cho học sinh lớp 5 (handoff → Aegis-StoryTeller)
-9. [ ] **Chạy test suite** — ~187 host tests + 21 QEMU checkpoints (handoff → Aegis-Tester)
-10. [ ] **Cập nhật README.md** — reflect Phase K+L stats (hiện tại lỗi thời nghiêm trọng: ghi 69 tests thay vì 187)
-11. [ ] **Cập nhật `copilot-instructions.md`** — reflect cấu trúc mới arch/kernel/platform
+8. [x] **Viết blog #12** — ✅ giải thích arch separation + ELF loading cho học sinh lớp 5
+9. [x] **Chạy test suite** — ✅ 189 host tests + 25 QEMU checkpoints (2026-02-12)
+10. [x] **Cập nhật README.md** — ✅ reflect Phase A–L stats (189 tests, 25 checkpoints, 13 syscalls, 12 blogs)
+11. [x] **Cập nhật `copilot-instructions.md`** — ✅ reflect cấu trúc mới arch/kernel/platform
