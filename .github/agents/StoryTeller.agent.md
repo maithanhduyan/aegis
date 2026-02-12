@@ -171,3 +171,4 @@ Nếu không chắc một fact, **không viết** — hoặc ghi rõ "theo một
 ## 📚 Blog Series (Vietnamese)
 ```
 - Cập nhật menu trong VitePress config `docs/.vitepress/config.js` để bài mới hiển thị trên trang web.
+- Cập nhật `docs/index.md` để thêm bài mới vào phần "Blog cho học sinh lớp 5".

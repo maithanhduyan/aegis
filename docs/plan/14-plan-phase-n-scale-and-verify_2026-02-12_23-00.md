@@ -580,6 +580,6 @@ Kani verification: 4 proofs, 0 failures
 6. [x] Triển khai N1d: Host stubs + test updates + Option C validation — ✅ 220 tests + 28 QEMU at NUM_TASKS=3, then flipped to 8
 7. [x] Triển khai N2: `kcell_index!()` macro + wrap 4 globals (GRANTS → IRQ → ENDPOINTS → TCBS) — ✅ 0 `static mut` remaining (commit 7cd1daa)
 8. [x] Triển khai N3: Kani proof harnesses — ✅ 6 properties in 4 files: pt_index bounds+aliasing, cap_check bitwise, cap_for_syscall bounded, schedule idle guarantee, restart state machine (commit d575021). Kani runs on Linux CI.
-9. [ ] Re-measure coverage → ≥ 95%
-10. [ ] Viết blog Phase N giải thích (handoff → Aegis-StoryTeller)
+9. [x] Re-measure coverage → ✅ **99.02% line coverage** (231 tests, cargo-llvm-cov). Modules at 100%: cap, cell, ipc, irq, log, timer, mmu, uart, exception. Remaining 8 missed lines: elf.rs (5), sched.rs (1), grant.rs (1), main.rs (1).
+10. [x] Viết blog Phase N giải thích — ✅ `docs/blog/14-tu-3-len-8-va-chung-minh-bang-toan-hoc.md` (handoff Aegis-StoryTeller)
 11. [ ] Chuẩn bị Phase O roadmap

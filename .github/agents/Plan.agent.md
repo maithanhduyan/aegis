@@ -281,4 +281,5 @@ Kế hoạch PHẢI tuân theo cấu trúc chuẩn hóa này (đúc rút từ 9 
   - Ví dụ: `docs/plan/10-plan-interrupt-routing_2026-02-12_10-00.md`
 - Khi phase hoàn thành, cập nhật trạng thái: `📋 DRAFT` → `✅ HOÀN THÀNH`
 - Cập nhật mục lục trong `docs/.vitepress/config.mts` để liên kết kế hoạch mới.
+- Cập nhật `docs/index.md` để thêm bài mới vào phần "Kế hoạch phát triển".
 ## Cuối file LUÔN đề xuất các bước tiếp theo/hành động dựa trên kế hoạch đã viết.

@@ -1,0 +1,56 @@
+# ─── AegisOS Dev Container — Docker Compose ─────────────────────────
+# Quản lý named volumes cho cargo cache & build artifacts
+# Usage:  VS Code "Reopen in Container" (auto-detected)
+#         hoặc: docker compose -f .devcontainer/docker-compose.yml up -d
+
+services:
+  aegis-dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    container_name: aegis-dev
+    hostname: aegis
+
+    # ── Workspace bind-mount ───────────────────────────────────────
+    volumes:
+      # Source code — bind mount từ host
+      - ..:/workspaces/aegis:cached
+
+      # Cargo registry index + crate downloads
+      - cargo-registry:/home/aegis/.cargo/registry
+
+      # Cargo git checkouts (git dependencies)
+      - cargo-git:/home/aegis/.cargo/git
+
+      # Build artifacts (target/) — tách riêng để không sync về host
+      - cargo-target:/workspaces/aegis/target
+
+      # Kani toolchain + CBMC — persist qua rebuild
+      - kani-home:/home/aegis/.kani
+
+    # ── Security ───────────────────────────────────────────────────
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+
+    # ── Keep container alive for VS Code attach ────────────────────
+    command: sleep infinity
+    user: aegis
+
+    # ── Environment ────────────────────────────────────────────────
+    environment:
+      - CARGO_HOME=/home/aegis/.cargo
+      - RUSTUP_HOME=/home/aegis/.rustup
+
+# ─── Named volumes ────────────────────────────────────────────────
+# `docker volume ls` để xem, `docker volume prune` để dọn
+volumes:
+  cargo-registry:
+    name: aegis-cargo-registry
+  cargo-git:
+    name: aegis-cargo-git
+  cargo-target:
+    name: aegis-target
+  kani-home:
+    name: aegis-kani-home

@@ -18,7 +18,24 @@
         "/^powershell -ExecutionPolicy Bypass -File tests/qemu_boot_test\\.ps1 2>&1$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "/^powershell -ExecutionPolicy Bypass -File tests\\\\qemu_boot_test\\.ps1 2>&1 \\| Select-Object -Last 40$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^powershell -ExecutionPolicy Bypass -File tests\\\\qemu_boot_test\\.ps1 2>&1 \\| Select-Object -Last 35$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^powershell -ExecutionPolicy Bypass -File tests\\\\qemu_boot_test\\.ps1 2>&1 \\| Select-Object -Last 10$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "Set-Content": true,
+        "cargo kani": true,
+        "cargo install": true,
+        "kani": true,
+        "cargo llvm-cov": true
     }
 
 }

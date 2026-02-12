@@ -1,0 +1,38 @@
+{
+    "name": "AegisOS Dev (Ubuntu 24.04 + Kani + QEMU)",
+
+    // ── Docker Compose quản lý volumes + security ──────────────────
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "aegis-dev",
+    "workspaceFolder": "/workspaces/aegis",
+
+    // ── VS Code extensions & settings ──────────────────────────────
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "vadimcn.vscode-lldb",
+                "tamasfe.even-better-toml",
+                "serayuzgur.crates",
+                "usernamehw.errorlens"
+            ],
+            "settings": {
+                "rust-analyzer.cargo.target": "x86_64-unknown-linux-gnu",
+                "rust-analyzer.check.command": "clippy",
+                "rust-analyzer.check.extraArgs": [
+                    "--target", "x86_64-unknown-linux-gnu"
+                ],
+                "terminal.integrated.defaultProfile.linux": "bash"
+            }
+        }
+    },
+
+    // Run as non-root user
+    "remoteUser": "aegis",
+
+    // Post-create: ensure toolchain is ready
+    "postCreateCommand": "rustup show && cargo kani --version && qemu-system-aarch64 --version",
+
+    // Shutdown action — stop compose services when closing VS Code
+    "shutdownAction": "stopCompose"
+}

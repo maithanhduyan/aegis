@@ -552,4 +552,4 @@ Phase M **DONE** khi tất cả điều kiện sau đạt:
 7. [x] Chạy test suite đầy đủ — **219 host tests + 28 QEMU checkpoints pass**
 8. [x] Push to `origin/main` — commits `75a9593`..`02afae8`
 9. [x] Viết blog Phase M giải thích — bài #13 `docs/blog/13-lam-sao-chung-minh-phan-mem-khong-co-loi.md`
-10. [ ] Chuẩn bị Phase N roadmap: NUM_TASKS=8 + Kani pilot + TCBS/ENDPOINTS/GRANTS/IRQ_BINDINGS encapsulation
+10. [x] Chuẩn bị Phase N roadmap — `docs/plan/14-plan-phase-n-scale-and-verify_2026-02-12_23-00.md`

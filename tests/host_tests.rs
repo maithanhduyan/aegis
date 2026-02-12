@@ -36,6 +36,9 @@ use aegis_os::cap::{
 use aegis_os::grant::{self, EMPTY_GRANT, MAX_GRANTS};
 use aegis_os::irq::{self, EMPTY_BINDING, MAX_IRQ_BINDINGS};
 use aegis_os::elf::{self, ElfError, ElfLoadError, ElfSegment, ElfInfo, MAX_SEGMENTS, PF_R, PF_W, PF_X};
+use aegis_os::cell::KernelCell;
+use aegis_os::log::{LogLevel, log_prefix, log_message};
+use aegis_os::uart::{uart_print, uart_print_hex, uart_print_dec};
 
 // ─── Helper: read CURRENT safely (avoids static_mut_refs warning) ──
 
@@ -3241,5 +3244,109 @@ fn ipc_recv_loads_frame_on_immediate() {
         // The TCB should have the message
         assert_eq!((*sched::TCBS.get_mut())[1].context.x[0], 0xABCD);
         assert_eq!((*sched::TCBS.get_mut())[1].context.x[1], 0xEF01);
+    }
+}
+
+// ─── N-final: Coverage tests — uart, log, cell ────────────────────
+
+#[test]
+fn uart_print_hex_basic() {
+    // On host, uart_write is no-op — we just verify no panic/OOB.
+    uart_print_hex(0);
+    uart_print_hex(0xDEAD_BEEF_CAFE_F00D);
+    uart_print_hex(u64::MAX);
+}
+
+#[test]
+fn uart_print_dec_zero() {
+    uart_print_dec(0);
+}
+
+#[test]
+fn uart_print_dec_nonzero() {
+    uart_print_dec(1);
+    uart_print_dec(42);
+    uart_print_dec(12345678901234567890);
+    uart_print_dec(u64::MAX);
+}
+
+#[test]
+fn uart_print_empty_and_nonempty() {
+    uart_print("");
+    uart_print("hello world");
+}
+
+#[test]
+fn kernel_cell_get_read() {
+    let cell = KernelCell::new(42u64);
+    unsafe {
+        assert_eq!(*cell.get(), 42);
+    }
+}
+
+#[test]
+fn kernel_cell_as_ptr_stable() {
+    let cell = KernelCell::new(99u64);
+    let p1 = cell.as_ptr();
+    let p2 = cell.as_ptr();
+    assert_eq!(p1, p2, "as_ptr must return the same pointer");
+    unsafe {
+        assert_eq!(*p1, 99);
+    }
+}
+
+#[test]
+fn kernel_cell_get_then_get_mut_roundtrip() {
+    let cell = KernelCell::new(10u64);
+    unsafe {
+        assert_eq!(*cell.get(), 10);
+        *cell.get_mut() = 20;
+        assert_eq!(*cell.get(), 20);
+        assert_eq!(*cell.as_ptr(), 20);
+    }
+}
+
+#[test]
+fn log_prefix_all_levels() {
+    // On host, UART is no-op; we verify no panic and that all LogLevel
+    // variants are handled (coverage for the match arms in log_prefix).
+    unsafe {
+        reset_test_state();
+        log_prefix(LogLevel::Error);
+        log_prefix(LogLevel::Warn);
+        log_prefix(LogLevel::Info);
+        log_prefix(LogLevel::Debug);
+    }
+}
+
+#[test]
+fn log_message_basic() {
+    unsafe {
+        reset_test_state();
+        log_message(LogLevel::Info, format_args!("boot complete"));
+        log_message(LogLevel::Error, format_args!("task {} faulted", 1));
+        log_message(LogLevel::Warn, format_args!("budget low"));
+        log_message(LogLevel::Debug, format_args!("tick={}", 42));
+    }
+}
+
+#[test]
+fn log_level_ordering() {
+    assert!(LogLevel::Error < LogLevel::Warn);
+    assert!(LogLevel::Warn < LogLevel::Info);
+    assert!(LogLevel::Info < LogLevel::Debug);
+}
+
+#[test]
+fn klog_macro_compiles() {
+    // klog! macro with level <= LOG_LEVEL should call log_message.
+    // On host, UART is no-op. Just verify no panic.
+    unsafe {
+        reset_test_state();
+        aegis_os::klog!(LogLevel::Info, "scheduler initialized");
+        aegis_os::klog!(LogLevel::Error, "fault at 0x{:X}", 0xDEADu64);
+        aegis_os::klog!(LogLevel::Warn, "task {} budget exhausted", 2);
+        // Debug level (3) > LOG_LEVEL (2) → should be compiled out
+        aegis_os::klog!(LogLevel::Debug, "this should be eliminated");
     }
 }

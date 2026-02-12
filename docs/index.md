@@ -30,7 +30,7 @@ features:
 
   - icon: 🚀
     title: QEMU Ready
-    details: Chạy trên QEMU virt machine với Cortex-A53. Có 135 unit test và 15 QEMU checkpoint.
+    details: Chạy trên QEMU virt machine với Cortex-A53. Có 231 unit test, 30 QEMU checkpoint, và 6 Kani formal proof.
 
   - icon: 📖
     title: Blog cho học sinh lớp 5
@@ -39,8 +39,8 @@ features:
     linkText: Đọc ngay
 
   - icon: 🧩
-    title: 10 Phase phát triển
-    details: Từ First Heartbeat → MMU → Scheduler → IPC → Fault Isolation → Capability → Address Space → User-Mode Driver.
+    title: 14 Phase phát triển
+    details: Từ First Heartbeat → MMU → Scheduler → IPC → Fault Isolation → Capability → Address Space → User-Mode Driver → ELF Loader → Safety Assurance → Scale & Verify.
     link: /plan/01-plan-first-heartbeat_2026-02-10_00-00
     linkText: Xem kế hoạch
 ---
