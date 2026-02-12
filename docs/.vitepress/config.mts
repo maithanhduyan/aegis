@@ -115,6 +115,7 @@ export default defineConfig({
     'prompts/**',
     'test/**',
     'idea/**',
+    'discussions/**',
     'node_modules/**',
   ],
 })

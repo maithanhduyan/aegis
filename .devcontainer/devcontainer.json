@@ -30,8 +30,17 @@
     // Run as non-root user
     "remoteUser": "aegis",
 
-    // Post-create: ensure toolchain is ready
-    "postCreateCommand": "rustup show && cargo kani --version && qemu-system-aarch64 --version",
+    // Forward VitePress dev server port
+    "forwardPorts": [5173],
+    "portsAttributes": {
+        "5173": {
+            "label": "VitePress Dev",
+            "onAutoForward": "notify"
+        }
+    },
+
+    // Post-create: ensure toolchain is ready + install docs deps
+    "postCreateCommand": "rustup show && cargo kani --version && qemu-system-aarch64 --version && bun --version && cd docs && bun install",
 
     // Shutdown action — stop compose services when closing VS Code
     "shutdownAction": "stopCompose"
