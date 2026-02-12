@@ -86,6 +86,7 @@ pub fn irq_bind(intid: u32, task_id: usize, notify_bit: u64) -> u64 {
         return ERR_INVALID_INTID;
     }
 
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         // Check for duplicate: same INTID already bound
         for i in 0..MAX_IRQ_BINDINGS {
@@ -143,6 +144,7 @@ pub fn irq_bind(intid: u32, task_id: usize, notify_bit: u64) -> u64 {
 /// The task must be the one that received the notification.
 /// Clears pending_ack and re-enables the INTID in the GIC.
 pub fn irq_ack(intid: u32, task_id: usize) -> u64 {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_IRQ_BINDINGS {
             if IRQ_BINDINGS[i].active
@@ -186,6 +188,7 @@ pub fn irq_ack(intid: u32, task_id: usize) -> u64 {
 /// If not bound, prints a warning and ignores.
 #[cfg(target_arch = "aarch64")]
 pub fn irq_route(intid: u32, _frame: &mut crate::exception::TrapFrame) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_IRQ_BINDINGS {
             if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].intid == intid {
@@ -225,6 +228,7 @@ pub fn irq_route(intid: u32, _frame: &mut crate::exception::TrapFrame) {
 /// Stub for host tests — irq_route requires TrapFrame which is AArch64-only.
 #[cfg(not(target_arch = "aarch64"))]
 pub fn irq_route_test(intid: u32, task_id: usize) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_IRQ_BINDINGS {
             if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].intid == intid {
@@ -254,6 +258,7 @@ pub fn irq_route_test(intid: u32, task_id: usize) {
 /// Clean up all IRQ bindings for a faulted/restarted task.
 /// If binding has pending_ack, re-enable the INTID (unmask orphaned IRQ).
 pub fn irq_cleanup_task(task_id: usize) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_IRQ_BINDINGS {
             if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].task_id == task_id {

@@ -61,6 +61,7 @@ pub fn grant_page_addr(grant_id: usize) -> Option<u64> {
     extern "C" {
         static __grant_pages_start: u8;
     }
+    // SAFETY: Linker-provided symbol, address taken for grant page calculation.
     let base = unsafe { &__grant_pages_start as *const u8 as u64 };
     Some(base + (grant_id as u64) * GRANT_PAGE_SIZE as u64)
 }
@@ -93,6 +94,7 @@ pub fn grant_create(grant_id: usize, owner: usize, peer: usize) -> u64 {
         return 0xFFFF_0001;
     }
 
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         if GRANTS[grant_id].active {
             uart_print("!!! GRANT: already active\n");
@@ -151,6 +153,7 @@ pub fn grant_revoke(grant_id: usize, caller: usize) -> u64 {
         return 0xFFFF_0001;
     }
 
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         if !GRANTS[grant_id].active {
             return 0; // no-op: already inactive
@@ -187,6 +190,7 @@ pub fn grant_revoke(grant_id: usize, caller: usize) -> u64 {
 /// If the task is peer: unmap peer's access.
 /// Called from sched::fault_current_task() and sched::restart_task().
 pub fn cleanup_task(task_idx: usize) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_GRANTS {
             if !GRANTS[i].active {

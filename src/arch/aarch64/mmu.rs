@@ -196,6 +196,8 @@ fn sym_addr(sym: &u8) -> usize {
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn table_ptr(index: usize) -> *mut u64 {
+    // SAFETY: Linker-provided symbol __page_tables_start is 4KB-aligned.
+    // Pointer arithmetic stays within allocated page table region.
     unsafe {
         let base = sym_addr(&__page_tables_start);
         (base + index * 4096) as *mut u64

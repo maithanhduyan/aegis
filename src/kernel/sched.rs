@@ -114,12 +114,15 @@ pub fn init(
         static __user_stacks_start: u8;  // user stacks (SP_EL0)
     }
 
+    // SAFETY: Linker-provided symbol, address taken for stack calculation.
     let kstacks_base = unsafe { &__task_stacks_start as *const u8 as u64 };
+    // SAFETY: Linker-provided symbol, address taken for stack calculation.
     let ustacks_base = unsafe { &__user_stacks_start as *const u8 as u64 };
 
     // Each stack is 4KB. Stack grows downward, so top = base + (i+1)*4096
     // SPSR = 0x000 = EL0t: eret drops to EL0, uses SP_EL0
     // When exception from EL0 → EL1, CPU automatically uses SP_EL1
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         // Task 0: task_a
         TCBS[0].id = 0;
@@ -166,6 +169,9 @@ pub fn init(
 /// stack top. The RESTORE_CONTEXT_EL0 macro reads this and sets SP
 /// before eret, so the next exception from EL0 uses the correct stack.
 pub fn schedule(frame: &mut TrapFrame) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
+    // ptr::copy_nonoverlapping: src and dst are valid pointers to non-overlapping TrapFrame-sized memory within static TCBS array.
+    // Inline asm (msr ttbr0_el1): switches address space to new task's page table. Called at EL1.
     unsafe {
         let old = CURRENT;
 
@@ -247,28 +253,33 @@ pub fn schedule(frame: &mut TrapFrame) {
 
 /// Get current task ID
 pub fn current_task_id() -> u16 {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe { TCBS[CURRENT].id }
 }
 
 /// Set task state (used by IPC to block/unblock tasks)
 pub fn set_task_state(task_idx: usize, state: TaskState) {
     if task_idx < NUM_TASKS {
+        // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
         unsafe { TCBS[task_idx].state = state; }
     }
 }
 
 /// Get a register value from a task's saved context
 pub fn get_task_reg(task_idx: usize, reg: usize) -> u64 {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe { TCBS[task_idx].context.x[reg] }
 }
 
 /// Set a register value in a task's saved context
 pub fn set_task_reg(task_idx: usize, reg: usize, val: u64) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe { TCBS[task_idx].context.x[reg] = val; }
 }
 
 /// Save the current TrapFrame into a task's TCB context
 pub fn save_frame(task_idx: usize, frame: &TrapFrame) {
+    // SAFETY: src and dst are valid pointers to non-overlapping TrapFrame-sized memory within static TCBS array.
     unsafe {
         core::ptr::copy_nonoverlapping(
             frame as *const TrapFrame,
@@ -280,6 +291,7 @@ pub fn save_frame(task_idx: usize, frame: &TrapFrame) {
 
 /// Load a task's TCB context into the TrapFrame
 pub fn load_frame(task_idx: usize, frame: &mut TrapFrame) {
+    // SAFETY: src and dst are valid pointers to non-overlapping TrapFrame-sized memory within static TCBS array.
     unsafe {
         core::ptr::copy_nonoverlapping(
             &TCBS[task_idx].context as *const TrapFrame,
@@ -292,6 +304,7 @@ pub fn load_frame(task_idx: usize, frame: &mut TrapFrame) {
 /// Mark the currently running task as Faulted, cleanup IPC, and schedule away.
 /// Called from exception handlers when a lower-EL fault is recoverable.
 pub fn fault_current_task(frame: &mut TrapFrame) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         let current = CURRENT;
         let id = TCBS[current].id;
@@ -323,6 +336,8 @@ pub fn fault_current_task(frame: &mut TrapFrame) {
 /// Restart a faulted task: zero context, reload entry point + stack, mark Ready.
 /// Called from schedule() when restart delay has elapsed.
 pub fn restart_task(task_idx: usize) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
+    // ptr::write_bytes: pointer targets valid TrapFrame/stack memory within static TCBS array and linker-placed sections.
     unsafe {
         if TCBS[task_idx].state != TaskState::Faulted {
             return;
@@ -371,6 +386,7 @@ pub fn restart_task(task_idx: usize) {
 /// Reset all tasks' ticks_used to 0 at the start of a new epoch.
 /// Called from timer tick_handler when EPOCH_TICKS reaches EPOCH_LENGTH.
 pub fn epoch_reset() {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         EPOCH_TICKS = 0;
         for i in 0..NUM_TASKS {
@@ -384,6 +400,7 @@ pub fn epoch_reset() {
 /// within that interval, mark it Faulted (will auto-restart after delay).
 pub fn watchdog_scan() {
     let now = crate::timer::tick_count();
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..NUM_TASKS {
             let hb = TCBS[i].heartbeat_interval;
@@ -414,6 +431,7 @@ pub fn watchdog_scan() {
 /// Does nothing if task_idx is out of range.
 pub fn set_task_priority(task_idx: usize, priority: u8) {
     if task_idx < NUM_TASKS {
+        // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
         unsafe { TCBS[task_idx].priority = priority; }
     }
 }
@@ -421,6 +439,7 @@ pub fn set_task_priority(task_idx: usize, priority: u8) {
 /// Get a task's current effective priority.
 pub fn get_task_priority(task_idx: usize) -> u8 {
     if task_idx < NUM_TASKS {
+        // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
         unsafe { TCBS[task_idx].priority }
     } else {
         0
@@ -430,6 +449,7 @@ pub fn get_task_priority(task_idx: usize) -> u8 {
 /// Get a task's base (original) priority.
 pub fn get_task_base_priority(task_idx: usize) -> u8 {
     if task_idx < NUM_TASKS {
+        // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
         unsafe { TCBS[task_idx].base_priority }
     } else {
         0
@@ -439,6 +459,7 @@ pub fn get_task_base_priority(task_idx: usize) -> u8 {
 /// Restore a task's priority to its base priority (undo inheritance).
 pub fn restore_base_priority(task_idx: usize) {
     if task_idx < NUM_TASKS {
+        // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
         unsafe { TCBS[task_idx].priority = TCBS[task_idx].base_priority; }
     }
 }
@@ -446,6 +467,7 @@ pub fn restore_base_priority(task_idx: usize) {
 /// Record a heartbeat for the current task.
 pub fn record_heartbeat(task_idx: usize, interval: u64) {
     if task_idx < NUM_TASKS {
+        // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
         unsafe {
             TCBS[task_idx].heartbeat_interval = interval;
             TCBS[task_idx].last_heartbeat = crate::timer::tick_count();
@@ -462,6 +484,8 @@ pub fn record_heartbeat(task_idx: usize, interval: u64) {
 /// entry, so the bootstrap SP value doesn't matter after this point.
 #[cfg(target_arch = "aarch64")]
 pub fn bootstrap() -> ! {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
+    // Inline asm: sets TTBR0_EL1, ELR_EL1, SPSR_EL1, SP_EL0 and erets into EL0 user task. Called at EL1.
     unsafe {
         TCBS[0].state = TaskState::Running;
         CURRENT = 0;

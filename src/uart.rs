@@ -13,6 +13,7 @@ const UART0: *mut u8 = 0x0900_0000 as *mut u8;
 /// Write a single byte to UART
 #[cfg(target_arch = "aarch64")]
 pub fn uart_write(byte: u8) {
+    // SAFETY: UART0 (0x0900_0000) is the known PL011 data register on QEMU virt. Write-only for serial output.
     unsafe { ptr::write_volatile(UART0, byte) }
 }
 

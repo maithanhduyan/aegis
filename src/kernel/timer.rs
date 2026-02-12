@@ -22,14 +22,17 @@ pub static mut TICK_COUNT: u64 = 0;
 #[cfg(target_arch = "aarch64")]
 pub fn init(tick_ms: u32) {
     let freq: u64;
+    // SAFETY: Reading CNTFRQ_EL0 (timer frequency register). Read-only, always accessible. Called at EL1.
     unsafe {
         core::arch::asm!("mrs {}, CNTFRQ_EL0", out(reg) freq, options(nomem, nostack));
     }
 
     let ticks = freq * (tick_ms as u64) / 1000;
+    // SAFETY: Called once during boot, before interrupts are enabled. No concurrent access.
     unsafe { TICK_INTERVAL = ticks; }
 
     // Set countdown value
+    // SAFETY: Writing CNTP_TVAL_EL0 to arm the EL1 physical timer. Called at EL1 during boot.
     unsafe {
         core::arch::asm!(
             "msr CNTP_TVAL_EL0, {t}",
@@ -39,6 +42,7 @@ pub fn init(tick_ms: u32) {
     }
 
     // Enable timer, unmask interrupt (ENABLE=1, IMASK=0)
+    // SAFETY: Writing CNTP_CTL_EL0 to enable the timer and unmask its interrupt. Called at EL1 during boot.
     unsafe {
         core::arch::asm!(
             "mov x0, #1",
@@ -59,7 +63,9 @@ pub fn init(tick_ms: u32) {
 /// Re-arm timer — call from IRQ handler
 #[cfg(target_arch = "aarch64")]
 pub fn rearm() {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     let ticks = unsafe { TICK_INTERVAL };
+    // SAFETY: Writing CNTP_TVAL_EL0 to re-arm the timer for the next tick. Called at EL1.
     unsafe {
         core::arch::asm!(
             "msr CNTP_TVAL_EL0, {t}",
@@ -72,12 +78,14 @@ pub fn rearm() {
 /// Timer tick handler — called from IRQ dispatch with TrapFrame
 #[cfg(target_arch = "aarch64")]
 pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe { TICK_COUNT += 1; }
 
     // Re-arm for next tick
     rearm();
 
     // Phase K: Track budget for current running task
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         let current = crate::sched::CURRENT;
         crate::sched::TCBS[current].ticks_used += 1;
@@ -101,6 +109,7 @@ pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
 /// Get current tick count
 #[allow(dead_code)]
 pub fn tick_count() -> u64 {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe { TICK_COUNT }
 }
 

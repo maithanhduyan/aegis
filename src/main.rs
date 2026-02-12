@@ -34,6 +34,7 @@ core::arch::global_asm!(include_str!("arch/aarch64/boot.s"));
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_yield() {
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "mov x7, #0",
@@ -48,6 +49,7 @@ pub fn syscall_yield() {
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_send(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) {
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -67,6 +69,7 @@ pub fn syscall_send(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) {
 #[inline(always)]
 pub fn syscall_recv(ep_id: u64) -> u64 {
     let msg0: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -85,6 +88,7 @@ pub fn syscall_recv(ep_id: u64) -> u64 {
 pub fn syscall_recv2(ep_id: u64) -> (u64, u64) {
     let msg0: u64;
     let msg1: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -103,6 +107,7 @@ pub fn syscall_recv2(ep_id: u64) -> (u64, u64) {
 #[inline(always)]
 pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
     let reply0: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -123,6 +128,7 @@ pub fn syscall_call(ep_id: u64, m0: u64, m1: u64, m2: u64, m3: u64) -> u64 {
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_write(buf: *const u8, len: usize) {
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -145,6 +151,7 @@ pub fn user_print(s: &str) {
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn syscall_notify(target_id: u64, bits: u64) {
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -162,6 +169,7 @@ pub fn syscall_notify(target_id: u64, bits: u64) {
 #[inline(always)]
 pub fn syscall_wait_notify() -> u64 {
     let bits: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -179,6 +187,7 @@ pub fn syscall_wait_notify() -> u64 {
 #[inline(always)]
 pub fn syscall_grant_create(grant_id: u64, peer_task_id: u64) -> u64 {
     let result: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -199,6 +208,7 @@ pub fn syscall_grant_create(grant_id: u64, peer_task_id: u64) -> u64 {
 #[inline(always)]
 pub fn syscall_grant_revoke(grant_id: u64) -> u64 {
     let result: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -217,6 +227,7 @@ pub fn syscall_grant_revoke(grant_id: u64) -> u64 {
 #[inline(always)]
 pub fn syscall_irq_bind(intid: u64, notify_bit: u64) -> u64 {
     let result: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -237,6 +248,7 @@ pub fn syscall_irq_bind(intid: u64, notify_bit: u64) -> u64 {
 #[inline(always)]
 pub fn syscall_irq_ack(intid: u64) -> u64 {
     let result: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -256,6 +268,7 @@ pub fn syscall_irq_ack(intid: u64) -> u64 {
 #[inline(always)]
 pub fn syscall_device_map(device_id: u64) -> u64 {
     let result: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -275,6 +288,7 @@ pub fn syscall_device_map(device_id: u64) -> u64 {
 #[inline(always)]
 pub fn syscall_heartbeat(interval: u64) -> u64 {
     let result: u64;
+    // SAFETY: SVC triggers synchronous exception handled by kernel vector table. Register ABI is documented in syscall convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -324,6 +338,7 @@ pub extern "C" fn uart_driver_entry() -> ! {
 
         // Write each byte directly to UART DR (EL0 MMIO write!)
         for i in 0..len {
+            // SAFETY: buf_addr points to grant page (identity-mapped), UART0_DR is mapped EL0 device MMIO.
             unsafe {
                 let byte = core::ptr::read_volatile(buf_addr.add(i));
                 core::ptr::write_volatile(UART0_DR, byte);
@@ -357,6 +372,7 @@ pub extern "C" fn client_entry() -> ! {
         syscall_heartbeat(50);
         // 3. Write the message into the grant page
         let msg = b"J4:UserDrv ";
+        // SAFETY: grant_addr points to shared grant page mapped for this task. Write-volatile ensures MMIO-safe ordering.
         unsafe {
             for (i, &byte) in msg.iter().enumerate() {
                 core::ptr::write_volatile(grant_addr.add(i), byte);
@@ -373,6 +389,7 @@ pub extern "C" fn client_entry() -> ! {
 #[no_mangle]
 pub extern "C" fn idle_entry() -> ! {
     loop {
+        // SAFETY: wfi is a hint instruction that idles the core until next interrupt.
         unsafe { core::arch::asm!("wfi"); }
     }
 }
@@ -400,6 +417,7 @@ pub extern "C" fn kernel_main() -> ! {
     );
 
     // ─── Phase G: Assign capabilities ──────────────────────────────
+    // SAFETY: Single-core kernel, called during boot before interrupts enabled. No concurrent access.
     unsafe {
         use aegis_os::cap::*;
         // Task 0 (UART driver): needs RECV/SEND on EP0 + WRITE + YIELD + notifications + grants + IRQ + device map + heartbeat
@@ -416,6 +434,7 @@ pub extern "C" fn kernel_main() -> ! {
     uart_print("[AegisOS] capabilities assigned\n");
 
     // ─── Phase K: Assign priorities and time budgets ────────────────
+    // SAFETY: Single-core kernel, called during boot before interrupts enabled. No concurrent access.
     unsafe {
         // Task 0 (UART driver): high priority, unlimited budget
         sched::TCBS[0].priority = 6;
@@ -442,6 +461,7 @@ pub extern "C" fn kernel_main() -> ! {
     uart_print("[AegisOS] device MMIO mapping ready\n");
 
     // ─── Phase H: Assign per-task address spaces ───────────────────
+    // SAFETY: Single-core kernel, called during boot before interrupts enabled. No concurrent access.
     unsafe {
         use aegis_os::mmu;
         // ASID = task_id + 1 (ASID 0 is reserved for kernel boot)
@@ -464,7 +484,9 @@ pub extern "C" fn kernel_main() -> ! {
             static __elf_load_start: u8;
             static __elf_load_end: u8;
         }
+        // SAFETY: Linker-provided symbols marking ELF load region boundaries.
         let load_base = unsafe { &__elf_load_start as *const u8 as u64 };
+        // SAFETY: Linker-provided symbols marking ELF load region boundaries.
         let load_size = unsafe {
             (&__elf_load_end as *const u8 as u64) - load_base
         } as usize;
@@ -474,12 +496,15 @@ pub extern "C" fn kernel_main() -> ! {
 
         // Parse the embedded ELF
         if let Ok(info) = aegis_os::elf::parse_elf64(USER_ELF) {
+            // SAFETY: Linker-provided symbols marking ELF load region boundaries.
             let dest = unsafe { &__elf_load_start as *const u8 as *mut u8 };
+            // SAFETY: dest points to __elf_load_start with load_size bytes writable (linker.ld .elf_load section).
             let result = unsafe {
                 aegis_os::elf::load_elf_segments(USER_ELF, &info, dest, load_base, load_size)
             };
             if let Ok(entry) = result {
                 // Cache maintenance: flush D-cache, invalidate I-cache
+                // SAFETY: Cache maintenance required after loading code. dc cvau flushes D-cache, ic iallu invalidates I-cache.
                 unsafe {
                     let mut addr = load_base;
                     let end = load_base + load_size as u64;
@@ -500,6 +525,7 @@ pub extern "C" fn kernel_main() -> ! {
                     );
                 }
                 // Set page permissions per segment
+                // SAFETY: task_id=2 is valid, vaddr from validated ELF segments. set_page_attr updates page table and invalidates TLB.
                 unsafe {
                     use aegis_os::mmu;
                     for i in 0..info.num_segments {
@@ -522,6 +548,7 @@ pub extern "C" fn kernel_main() -> ! {
                     }
                 }
                 // Override task 2 with ELF-loaded entry point
+                // SAFETY: Single-core kernel, called during boot. Task 2 not yet running.
                 unsafe {
                     sched::TCBS[2].entry_point = entry;
                     sched::TCBS[2].context.elr_el1 = entry;

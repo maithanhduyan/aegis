@@ -113,6 +113,9 @@ pub fn sys_send(frame: &mut TrapFrame, ep_id: usize) {
         return;
     }
 
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution.
+    // No concurrent access on uniprocessor QEMU virt.
+    // Accesses static mut ENDPOINTS; calls sched functions that access TCBS/CURRENT.
     unsafe {
         let current = sched::current_task_id() as usize;
 
@@ -151,6 +154,9 @@ pub fn sys_recv(frame: &mut TrapFrame, ep_id: usize) {
         return;
     }
 
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution.
+    // No concurrent access on uniprocessor QEMU virt.
+    // Accesses static mut ENDPOINTS; calls sched functions that access TCBS/CURRENT.
     unsafe {
         let current = sched::current_task_id() as usize;
 
@@ -186,6 +192,9 @@ pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
         return;
     }
 
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution.
+    // No concurrent access on uniprocessor QEMU virt.
+    // Accesses static mut ENDPOINTS; calls sched functions that access TCBS/CURRENT.
     unsafe {
         let current = sched::current_task_id() as usize;
 
@@ -252,6 +261,9 @@ fn maybe_boost_priority(blocker: usize, holder: usize) {
 /// If a partner was blocked waiting for this task, unblock the partner
 /// so it can be rescheduled (partner will retry IPC or find no match).
 pub fn cleanup_task(task_idx: usize) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution.
+    // No concurrent access on uniprocessor QEMU virt.
+    // Accesses static mut ENDPOINTS to clear faulted task from all endpoint slots.
     unsafe {
         for i in 0..MAX_ENDPOINTS {
             // If the faulted task was a pending sender, remove from queue

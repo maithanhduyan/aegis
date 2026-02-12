@@ -29,26 +29,31 @@ const GICC_EOIR: usize = 0x010;
 
 #[inline(always)]
 fn gicd_write(offset: usize, val: u32) {
+    // SAFETY: GICD_BASE (0x0800_0000) is the known MMIO address for GICv2 Distributor on QEMU virt.
     unsafe { ptr::write_volatile((GICD_BASE + offset) as *mut u32, val) }
 }
 
 #[inline(always)]
 fn gicd_read(offset: usize) -> u32 {
+    // SAFETY: GICD_BASE (0x0800_0000) is the known MMIO address for GICv2 Distributor on QEMU virt.
     unsafe { ptr::read_volatile((GICD_BASE + offset) as *const u32) }
 }
 
 #[inline(always)]
 fn gicc_write(offset: usize, val: u32) {
+    // SAFETY: GICC_BASE (0x0801_0000) is the known MMIO address for GICv2 CPU Interface on QEMU virt.
     unsafe { ptr::write_volatile((GICC_BASE + offset) as *mut u32, val) }
 }
 
 #[inline(always)]
 fn gicc_read(offset: usize) -> u32 {
+    // SAFETY: GICC_BASE (0x0801_0000) is the known MMIO address for GICv2 CPU Interface on QEMU virt.
     unsafe { ptr::read_volatile((GICC_BASE + offset) as *const u32) }
 }
 
 #[inline(always)]
 fn gicd_write_byte(offset: usize, val: u8) {
+    // SAFETY: GICD_BASE (0x0800_0000) is the known MMIO address. Byte-width access is valid for priority registers.
     unsafe { ptr::write_volatile((GICD_BASE + offset) as *mut u8, val) }
 }
 

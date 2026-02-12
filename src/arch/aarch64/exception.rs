@@ -318,6 +318,7 @@ _exc_serror_stub:
 #[no_mangle]
 pub extern "C" fn exception_dispatch_sync(frame: &mut TrapFrame, source: u64) {
     let esr: u64;
+    // SAFETY: Reading ESR_EL1 is a read-only system register access at EL1.
     unsafe { core::arch::asm!("mrs {}, esr_el1", out(reg) esr, options(nomem, nostack)) };
 
     let ec = (esr >> 26) & 0x3F;
@@ -367,10 +368,12 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
 
     // ─── Phase G: Capability check ─────────────────────────────────
     let required = crate::cap::cap_for_syscall(syscall_nr, ep_id);
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     let task_caps = unsafe { crate::sched::TCBS[crate::sched::CURRENT].caps };
 
     if !crate::cap::cap_check(task_caps, required) {
         uart_print("!!! CAP DENIED: task ");
+        // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
         uart_print_hex(unsafe { crate::sched::CURRENT } as u64);
         uart_print(" syscall #");
         uart_print_hex(syscall_nr);
@@ -435,6 +438,7 @@ fn handle_sys_write(frame: &TrapFrame) {
 
     // Safe to read — copy bytes to UART
     for i in 0..checked_len {
+        // SAFETY: buf_ptr validated by validate_write_args to be within user-accessible RAM range.
         let byte = unsafe { core::ptr::read_volatile((buf_ptr + i) as *const u8) };
         crate::uart_write(byte);
     }
@@ -459,6 +463,7 @@ fn handle_notify(frame: &mut TrapFrame) {
         return; // no-op
     }
 
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         // OR-merge notification bits into target's pending mask
         crate::sched::TCBS[target_id].notify_pending |= bits;
@@ -482,6 +487,7 @@ fn handle_notify(frame: &mut TrapFrame) {
 /// Otherwise: block caller, set notify_waiting=true, schedule away.
 #[cfg(target_arch = "aarch64")]
 fn handle_wait_notify(frame: &mut TrapFrame) {
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         let current = crate::sched::CURRENT;
 
@@ -507,6 +513,7 @@ fn handle_wait_notify(frame: &mut TrapFrame) {
 fn handle_grant_create(frame: &mut TrapFrame) {
     let grant_id = frame.x[0] as usize;
     let peer_id = frame.x[6] as usize;
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     let current = unsafe { crate::sched::CURRENT };
 
     let result = crate::grant::grant_create(grant_id, current, peer_id);
@@ -519,6 +526,7 @@ fn handle_grant_create(frame: &mut TrapFrame) {
 #[cfg(target_arch = "aarch64")]
 fn handle_grant_revoke(frame: &mut TrapFrame) {
     let grant_id = frame.x[0] as usize;
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     let current = unsafe { crate::sched::CURRENT };
 
     let result = crate::grant::grant_revoke(grant_id, current);
@@ -532,6 +540,7 @@ fn handle_grant_revoke(frame: &mut TrapFrame) {
 fn handle_irq_bind(frame: &mut TrapFrame) {
     let intid = frame.x[0] as u32;
     let notify_bit = frame.x[1];
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     let current = unsafe { crate::sched::CURRENT };
     let result = crate::irq::irq_bind(intid, current, notify_bit);
     frame.x[0] = result;
@@ -543,6 +552,7 @@ fn handle_irq_bind(frame: &mut TrapFrame) {
 #[cfg(target_arch = "aarch64")]
 fn handle_irq_ack(frame: &mut TrapFrame) {
     let intid = frame.x[0] as u32;
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     let current = unsafe { crate::sched::CURRENT };
     let result = crate::irq::irq_ack(intid, current);
     frame.x[0] = result;
@@ -554,7 +564,9 @@ fn handle_irq_ack(frame: &mut TrapFrame) {
 #[cfg(target_arch = "aarch64")]
 fn handle_device_map(frame: &mut TrapFrame) {
     let device_id = frame.x[0];
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     let current = unsafe { crate::sched::CURRENT };
+    // SAFETY: Called at EL1, device_id validated by match arm.
     let result = unsafe { crate::mmu::map_device_for_task(device_id, current) };
     frame.x[0] = result;
 }
@@ -565,6 +577,7 @@ fn handle_device_map(frame: &mut TrapFrame) {
 #[cfg(target_arch = "aarch64")]
 fn handle_heartbeat(frame: &mut TrapFrame) {
     let interval = frame.x[0];
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     let current = unsafe { crate::sched::CURRENT };
     crate::sched::record_heartbeat(current, interval);
     frame.x[0] = 0; // success
@@ -574,6 +587,7 @@ fn handle_heartbeat(frame: &mut TrapFrame) {
 #[cfg(target_arch = "aarch64")]
 fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
+    // SAFETY: Reading FAR_EL1 is a read-only system register access at EL1.
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
 
     let ec = (esr >> 26) & 0x3F;
@@ -609,6 +623,7 @@ fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     uart_print("\n  src:  ");
     uart_print_hex(source);
     uart_print("\n  HALTED.\n");
+    // SAFETY: wfe is a hint instruction that idles the core until next event.
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
@@ -616,6 +631,7 @@ fn handle_instruction_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
 #[cfg(target_arch = "aarch64")]
 fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     let far: u64;
+    // SAFETY: Reading FAR_EL1 is a read-only system register access at EL1.
     unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
 
     let ec = (esr >> 26) & 0x3F;
@@ -663,6 +679,7 @@ fn handle_data_abort(frame: &mut TrapFrame, esr: u64, source: u64) {
     uart_print("\n  src:  ");
     uart_print_hex(source);
     uart_print("\n  HALTED.\n");
+    // SAFETY: wfe is a hint instruction that idles the core until next event.
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
@@ -686,6 +703,7 @@ fn handle_fp_trap(frame: &mut TrapFrame, esr: u64, source: u64) {
     uart_print("  ESR: 0x");
     uart_print_hex(esr);
     uart_print("\n  HALTED.\n");
+    // SAFETY: wfe is a hint instruction that idles the core until next event.
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
@@ -717,6 +735,7 @@ fn handle_unknown(frame: &mut TrapFrame, esr: u64, ec: u64, source: u64) {
     uart_print("\n  src:  ");
     uart_print_hex(source);
     uart_print("\n  HALTED.\n");
+    // SAFETY: wfe is a hint instruction that idles the core until next event.
     loop { unsafe { core::arch::asm!("wfe") } }
 }
 
@@ -752,6 +771,7 @@ pub fn init() {
     extern "C" {
         static __exception_vectors: u8;
     }
+    // SAFETY: Writing VBAR_EL1 sets the exception vector base. __exception_vectors is linker-provided and 2KB-aligned.
     unsafe {
         let vbar = &__exception_vectors as *const u8 as u64;
         core::arch::asm!(
