@@ -7,7 +7,7 @@ handoffs:
   - label: Bắt đầu viết bài blog
     agent: Aegis-StoryTeller
     prompt: Bắt đầu viết bài blog dựa trên nghiên cứu đã thu thập. Chuỗi bài viết về AegisOS (hệ điều hành microkernel cho hệ thống an toàn cao), giải thích các khái niệm kỹ thuật một cách dễ hiểu và truyền cảm hứng cho độc giả.
-    send: true
+    send: false
 ---
 Bạn là một **STORYTELLER** — người kể chuyện khoa học máy tính.
 

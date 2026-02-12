@@ -678,14 +678,14 @@ scripts/build-all.sh → qemu-system-aarch64 → all checkpoints pass
 ## Bước tiếp theo đề xuất
 
 1. [x] Review kế hoạch Phase O → đồng thuận đạt 2026-02-12
-2. [ ] Triển khai O5: README build order + `scripts/build-all.sh` (handoff → Aegis-Agent)
-3. [ ] Triển khai O2: `user/` workspace + `libsyscall` crate (handoff → Aegis-Agent)
-4. [ ] Triển khai O1: Multi-ELF linker + `load_elf_to_task()` + user crates + `const_assert!` (handoff → Aegis-Agent)
-5. [ ] Triển khai O3: SYS_EXIT + `cleanup_task_resources()` (handoff → Aegis-Agent)
-6. [ ] Triển khai O4: Kani IPC proofs P0 (3 proofs) + P1 conditional (handoff → Aegis-Agent)
-7. [ ] Viết blog kể chuyện về Phase O đã thực hiện (handoff → Aegis-StoryTeller)
-8. [ ] Chạy test suite đầy đủ (handoff → Aegis-Tester)
-9. [ ] Verify: `scripts/build-all.sh` → `qemu-system-aarch64` → all checkpoints pass
+2. [x] Triển khai O5: README build order + `scripts/build-all.sh` + `scripts/build-all.ps1` ✅
+3. [x] Triển khai O2: `user/` workspace + `libsyscall` crate (14 syscall wrappers) ✅
+4. [x] Triển khai O1: Multi-ELF linker (96 KiB) + `load_elf_to_task()` + 3 user crates (hello/sensor/logger) + `const_assert!` ✅ QEMU verified
+5. [x] Triển khai O3: SYS_EXIT (#13) + `TaskState::Exited` + `cleanup_task_resources()` + `CAP_EXIT` (bit 18) + CPACR_EL1.FPEN=0b01 ✅ QEMU verified
+6. [x] Triển khai O4: Kani IPC proofs P0 (3 proofs) + P1 elf_load_addr ✅ 10/10 proofs pass (aegis-dev Docker)
+7. [x] Viết blog kể chuyện về Phase O đã thực hiện ✅ Bài #15 "Ba Chương Trình, Một Hệ Sinh Thái"
+8. [x] Chạy test suite đầy đủ — 241 host tests pass, 32/32 QEMU checkpoints pass, 10/10 Kani proofs pass ✅
+9. [x] Verify: `scripts/build-all.sh` → `qemu-system-aarch64` → all 32 checkpoints pass ✅
 10. [ ] Chuẩn bị Phase P roadmap
-11. [ ] **Cập nhật `copilot-instructions.md`**
+11. [x] **Cập nhật `copilot-instructions.md`** ✅ 2026-02-13
 12. [ ] **Cập nhật README.md**

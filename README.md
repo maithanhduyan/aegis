@@ -271,7 +271,7 @@ GitHub Actions runs both test suites on every push to `main`/`develop`:
 - **W^X everywhere.** No page is both writable and executable.
 - **Capability-enforced.** Every syscall is checked against the task's capability bitmask before dispatch.
 
-## 📚 Blog Series (Vietnamese, 14 articles)
+## 📚 Blog Series (Vietnamese, 15 articles)
 
 Explanations of OS concepts written for 5th-graders — making kernel development accessible:
 
@@ -289,6 +289,7 @@ Explanations of OS concepts written for 5th-graders — making kernel developmen
 12. [Dọn Nhà Và Đọc Sách Mục Lục — Arch Separation & ELF Loading](docs/blog/12-don-nha-va-doc-sach-muc-luc.md)
 13. [Làm Sao Chứng Minh Phần Mềm Không Có Lỗi? — Safety Assurance](docs/blog/13-lam-sao-chung-minh-phan-mem-khong-co-loi.md)
 14. [Từ 3 Lên 8 — Và Chứng Minh Bằng Toán Học](docs/blog/14-tu-3-len-8-va-chung-minh-bang-toan-hoc.md)
+15. [Ba Chương Trình, Một Hệ Sinh Thái — Multi-ELF & User Ecosystem](docs/blog/15-ba-chuong-trinh-mot-he-sinh-thai.md)
 
 ## 📜 Safety Standards Reference
 
