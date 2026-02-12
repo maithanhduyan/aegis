@@ -449,8 +449,9 @@ pub extern "C" fn kernel_main() -> ! {
     }
     uart_print("[AegisOS] per-task address spaces assigned\n");
 
-    // ─── Phase L1: Arch separation ─────────────────────────────────
+    // ─── Phase L: Arch separation ──────────────────────────────────
     uart_print("[AegisOS] arch separation: module tree ready\n");
+    uart_print("[AegisOS] arch separation: complete\n");
 
     timer::init(10);
 

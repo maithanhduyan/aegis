@@ -19,21 +19,36 @@ pub mod kernel;
 /// Platform constants (MMIO addresses, memory map)
 pub mod platform;
 
-// ─── Modules still at root (will move to arch/ or kernel/ in L2) ──
+// ─── UART: stays at root (tiny, dual-cfg) ──────────────────────────
 
 pub mod uart;
+
+// ─── MMU + Exception: full arch version on AArch64, host stub otherwise ─
+
+#[cfg(target_arch = "aarch64")]
+#[path = "arch/aarch64/mmu.rs"]
 pub mod mmu;
+
+#[cfg(not(target_arch = "aarch64"))]
+pub mod mmu; // reads src/mmu.rs (host-only stub)
+
+#[cfg(target_arch = "aarch64")]
+#[path = "arch/aarch64/exception.rs"]
 pub mod exception;
-pub mod sched;
-pub mod timer;
-pub mod grant;
-pub mod irq;
+
+#[cfg(not(target_arch = "aarch64"))]
+pub mod exception; // reads src/exception.rs (host-only stub)
 
 // ─── Backward-compatible re-exports ────────────────────────────────
-// So existing `crate::ipc`, `crate::cap`, `crate::gic` paths keep working.
+// So existing `crate::ipc`, `crate::cap`, `crate::gic`, `crate::sched`,
+// `crate::timer`, `crate::grant`, `crate::irq` paths keep working.
 
 pub use kernel::ipc;
 pub use kernel::cap;
+pub use kernel::sched;
+pub use kernel::timer;
+pub use kernel::grant;
+pub use kernel::irq;
 
 #[cfg(target_arch = "aarch64")]
 pub use arch::current::gic;
