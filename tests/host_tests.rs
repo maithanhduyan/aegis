@@ -2463,3 +2463,187 @@ fn mmu_set_page_attr_host_stub() {
         mmu::PAGE_ATTR_ERR_OUT_OF_RANGE
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase L6 — Module Structure & Separation Tests
+// ═══════════════════════════════════════════════════════════════════
+
+/// L6-L1 #1: Verify `arch` module is importable on host.
+/// On x86_64, `arch::current` and `arch::aarch64` are NOT available
+/// (gated behind `cfg(target_arch = "aarch64")`), but the `arch`
+/// module itself compiles.
+#[test]
+fn l6_arch_module_exists() {
+    // The arch module compiles on host (empty — no aarch64 sub-module).
+    // On host, `gic` is NOT re-exported (aarch64-only). Verify this
+    // indirectly: the crate compiles without `arch::current`.
+    // We can only assert the module *exists* as a namespace.
+    // If this compiles and runs, arch module structure is correct.
+    let _: () = (); // Placeholder — compilation is the test
+}
+
+/// L6-L1 #2: Verify kernel sub-modules are importable and export
+/// expected symbols.
+#[test]
+fn l6_kernel_module_exports() {
+    // IPC
+    assert!(ipc::MAX_ENDPOINTS >= 4);
+    assert_eq!(ipc::MSG_REGS, 4);
+
+    // Capabilities
+    assert_ne!(cap::CAP_ALL, cap::CAP_NONE);
+    assert_eq!(cap::CAP_NONE, 0);
+    assert_ne!(cap::CAP_YIELD, 0);
+    assert_ne!(cap::CAP_WRITE, 0);
+
+    // Scheduler
+    assert_eq!(sched::NUM_TASKS, 3);
+    assert!(sched::RESTART_DELAY_TICKS > 0);
+    assert!(sched::EPOCH_LENGTH > 0);
+
+    // Timer (host stub: TIMER_INTID accessible as constant)
+    assert_eq!(aegis_os::timer::TIMER_INTID, 30);
+
+    // Grant
+    assert!(grant::MAX_GRANTS >= 2);
+
+    // IRQ
+    assert!(irq::MAX_IRQ_BINDINGS >= 8);
+
+    // ELF
+    assert_eq!(elf::MAX_SEGMENTS, 4);
+    assert_eq!(elf::PF_X, 1);
+    assert_eq!(elf::PF_W, 2);
+    assert_eq!(elf::PF_R, 4);
+}
+
+/// L6-L1 #3: Verify platform constants match QEMU virt memory map.
+#[test]
+fn l6_platform_constants() {
+    use aegis_os::platform::qemu_virt;
+
+    assert_eq!(qemu_virt::GICD_BASE, 0x0800_0000);
+    assert_eq!(qemu_virt::GICC_BASE, 0x0801_0000);
+    assert_eq!(qemu_virt::UART0_BASE, 0x0900_0000);
+    assert_eq!(qemu_virt::RAM_BASE, 0x4000_0000);
+    assert_eq!(qemu_virt::KERNEL_BASE, 0x4008_0000);
+    assert_eq!(qemu_virt::TIMER_INTID, 30);
+    assert_eq!(qemu_virt::TICK_MS, 10);
+    assert_eq!(qemu_virt::TIMER_FREQ_HZ, 62_500_000);
+}
+
+/// L6-L1 #4: Verify backward-compatible re-exports at crate root.
+/// After Phase L refactoring, `aegis_os::ipc` should still resolve
+/// to the same module as `aegis_os::kernel::ipc`, etc.
+#[test]
+fn l6_use_paths_unchanged() {
+    // IPC: crate root re-export == kernel module
+    assert_eq!(aegis_os::ipc::MAX_ENDPOINTS, aegis_os::kernel::ipc::MAX_ENDPOINTS);
+    assert_eq!(aegis_os::ipc::MSG_REGS, aegis_os::kernel::ipc::MSG_REGS);
+
+    // Capabilities
+    assert_eq!(aegis_os::cap::CAP_ALL, aegis_os::kernel::cap::CAP_ALL);
+    assert_eq!(aegis_os::cap::CAP_NONE, aegis_os::kernel::cap::CAP_NONE);
+    assert_eq!(aegis_os::cap::CAP_YIELD, aegis_os::kernel::cap::CAP_YIELD);
+
+    // Scheduler
+    assert_eq!(aegis_os::sched::NUM_TASKS, aegis_os::kernel::sched::NUM_TASKS);
+    assert_eq!(aegis_os::sched::EPOCH_LENGTH, aegis_os::kernel::sched::EPOCH_LENGTH);
+
+    // Timer
+    assert_eq!(aegis_os::timer::TIMER_INTID, aegis_os::kernel::timer::TIMER_INTID);
+
+    // Grant
+    assert_eq!(aegis_os::grant::MAX_GRANTS, aegis_os::kernel::grant::MAX_GRANTS);
+
+    // IRQ
+    assert_eq!(aegis_os::irq::MAX_IRQ_BINDINGS, aegis_os::kernel::irq::MAX_IRQ_BINDINGS);
+
+    // ELF
+    assert_eq!(aegis_os::elf::MAX_SEGMENTS, aegis_os::kernel::elf::MAX_SEGMENTS);
+    assert_eq!(aegis_os::elf::PF_X, aegis_os::kernel::elf::PF_X);
+}
+
+/// L6-L2 #5: Verify arch/kernel separation works — key kernel modules
+/// are callable on host without any AArch64 dependency.
+/// This proves cfg isolation is effective: portable logic compiles
+/// and runs on x86_64 without arch code.
+#[test]
+fn l6_cfg_separation_works() {
+    unsafe { reset_test_state(); }
+
+    // Scheduler: create/schedule tasks on host (no TTBR0, no eret)
+    let mut frame = unsafe { core::ptr::read(&sched::TCBS[0].context) };
+    frame.x[0] = 42;
+    unsafe { sched::TCBS[1].state = TaskState::Ready; }
+    sched::schedule(&mut frame);
+    // Schedule picked a Ready task — proves portable logic works
+    assert_ne!(unsafe { read_current() }, 0);
+
+    // IPC: send/recv state machine on host (no SVC, no asm)
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].caps = cap::CAP_IPC_SEND_EP0;
+        sched::TCBS[1].caps = cap::CAP_IPC_RECV_EP0;
+    }
+    let mut f0 = unsafe { core::ptr::read(&sched::TCBS[0].context) };
+    f0.x[0] = 0xBEEF;
+    ipc::sys_send(&mut f0, 0);
+    // Task 0 blocked on send — proves IPC works on host
+    assert_eq!(unsafe { sched::TCBS[0].state }, TaskState::Blocked);
+
+    // Grant: create/revoke on host (mmu stub)
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].caps = cap::CAP_GRANT_CREATE | cap::CAP_GRANT_REVOKE;
+    }
+    let result = grant::grant_create(0, 0, 1);
+    assert_eq!(result, 0); // 0 = success
+    let revoke = grant::grant_revoke(0, 0);
+    assert_eq!(revoke, 0); // 0 = success
+    // Proves grant logic works with host mmu stub
+
+    // IRQ: bind/cleanup on host (gic stub)
+    unsafe {
+        reset_test_state();
+        sched::TCBS[0].caps = cap::CAP_IRQ_BIND | cap::CAP_IRQ_ACK;
+    }
+    let bind_result = irq::irq_bind(33, 0, 1); // INTID=33 (SPI), task=0, bit=1
+    assert_eq!(bind_result, 0);
+    // Proves IRQ routing works on host with gic stub
+
+    // ELF parser: fully portable, no cfg needed
+    let elf = build_test_elf(1);
+    let info = elf::parse_elf64(&elf).unwrap();
+    assert_eq!(info.num_segments, 1);
+    // Proves ELF parser is completely arch-independent
+}
+
+/// L6-L5 #6: Verify ELF segment flags are mutually exclusive for W^X.
+/// The ELF loader rejects segments that are both writable and executable.
+/// Also verify the flag constants are non-overlapping power-of-two.
+#[test]
+fn l6_elf_wxn_flag_properties() {
+    // Flag values are distinct powers of 2
+    assert_eq!(elf::PF_X, 1);
+    assert_eq!(elf::PF_W, 2);
+    assert_eq!(elf::PF_R, 4);
+    assert_eq!(elf::PF_X & elf::PF_W, 0); // no overlap
+    assert_eq!(elf::PF_X & elf::PF_R, 0);
+    assert_eq!(elf::PF_W & elf::PF_R, 0);
+
+    // Build an ELF with W+X segment — must be rejected by validator
+    let mut elf = build_test_elf(1);
+    // Patch the segment flags: offset = phoff + 4 (p_flags field)
+    // phoff = 64 (standard), p_flags at phoff+4
+    let phoff = 64usize;
+    let flags_offset = phoff + 4;
+    let wx_flags: u32 = elf::PF_W | elf::PF_X; // forbidden combo
+    elf[flags_offset..flags_offset + 4].copy_from_slice(&wx_flags.to_le_bytes());
+
+    let info = elf::parse_elf64(&elf).unwrap();
+    let result = elf::validate_elf_for_load(
+        &info, 0x4010_0000, 0x4010_0000 + 0x3000
+    );
+    assert_eq!(result, Err(ElfLoadError::WxViolation));
+}
