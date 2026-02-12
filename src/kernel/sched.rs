@@ -58,6 +58,8 @@ pub struct Tcb {
 /// 3 tasks: 0 = task_a, 1 = task_b, 2 = idle
 pub const NUM_TASKS: usize = 3;
 
+use crate::kernel::cell::KernelCell;
+
 pub static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
 pub static mut CURRENT: usize = 0;
 
@@ -67,8 +69,9 @@ pub const RESTART_DELAY_TICKS: u64 = 100;
 /// Phase K: Epoch length in ticks (100 ticks = 1 second)
 pub const EPOCH_LENGTH: u64 = 100;
 
-/// Phase K: Epoch tick counter — resets every EPOCH_LENGTH ticks
-pub static mut EPOCH_TICKS: u64 = 0;
+/// Phase K: Epoch tick counter — resets every EPOCH_LENGTH ticks.
+/// Encapsulated in KernelCell (Phase M1) — access via unsafe get()/get_mut().
+pub static EPOCH_TICKS: KernelCell<u64> = KernelCell::new(0);
 
 /// Phase K: Watchdog scan interval (every 10 ticks = 100ms)
 pub const WATCHDOG_SCAN_PERIOD: u64 = 10;
@@ -388,7 +391,7 @@ pub fn restart_task(task_idx: usize) {
 pub fn epoch_reset() {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
-        EPOCH_TICKS = 0;
+        *EPOCH_TICKS.get_mut() = 0;
         for i in 0..NUM_TASKS {
             TCBS[i].ticks_used = 0;
         }

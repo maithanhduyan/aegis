@@ -1837,11 +1837,11 @@ fn sched_epoch_reset_clears_ticks() {
         sched::TCBS[0].ticks_used = 42;
         sched::TCBS[1].ticks_used = 50;
         sched::TCBS[2].ticks_used = 10;
-        sched::EPOCH_TICKS = 99;
+        *sched::EPOCH_TICKS.get_mut() = 99;
 
         sched::epoch_reset();
 
-        assert_eq!(sched::EPOCH_TICKS, 0, "epoch counter should reset");
+        assert_eq!(*sched::EPOCH_TICKS.get(), 0, "epoch counter should reset");
         for i in 0..NUM_TASKS {
             assert_eq!(sched::TCBS[i].ticks_used, 0,
                 "task {} ticks_used should be reset", i);

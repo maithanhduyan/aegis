@@ -52,6 +52,7 @@ pub use kernel::grant;
 pub use kernel::irq;
 pub use kernel::elf;
 pub use kernel::log;
+pub use kernel::cell;
 
 #[cfg(target_arch = "aarch64")]
 pub use arch::current::gic;

@@ -6,13 +6,16 @@
 
 #[cfg(target_arch = "aarch64")]
 use crate::uart_print;
+#[cfg(target_arch = "aarch64")]
+use crate::kernel::cell::KernelCell;
 
 /// GIC INTID for EL1 Physical Timer (PPI 14)
 pub const TIMER_INTID: u32 = 30;
 
-/// Tick interval in ticks (computed at init)
+/// Tick interval in ticks (computed at init).
+/// Encapsulated in KernelCell (Phase M1) — access via unsafe get()/get_mut().
 #[cfg(target_arch = "aarch64")]
-static mut TICK_INTERVAL: u64 = 0;
+static TICK_INTERVAL: KernelCell<u64> = KernelCell::new(0);
 
 /// Monotonic tick counter
 pub static mut TICK_COUNT: u64 = 0;
@@ -29,7 +32,7 @@ pub fn init(tick_ms: u32) {
 
     let ticks = freq * (tick_ms as u64) / 1000;
     // SAFETY: Called once during boot, before interrupts are enabled. No concurrent access.
-    unsafe { TICK_INTERVAL = ticks; }
+    unsafe { *TICK_INTERVAL.get_mut() = ticks; }
 
     // Set countdown value
     // SAFETY: Writing CNTP_TVAL_EL0 to arm the EL1 physical timer. Called at EL1 during boot.
@@ -64,7 +67,7 @@ pub fn init(tick_ms: u32) {
 #[cfg(target_arch = "aarch64")]
 pub fn rearm() {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-    let ticks = unsafe { TICK_INTERVAL };
+    let ticks = unsafe { *TICK_INTERVAL.get() };
     // SAFETY: Writing CNTP_TVAL_EL0 to re-arm the timer for the next tick. Called at EL1.
     unsafe {
         core::arch::asm!(
@@ -91,8 +94,8 @@ pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
         crate::sched::TCBS[current].ticks_used += 1;
 
         // Phase K: Epoch management — reset budgets every EPOCH_LENGTH ticks
-        crate::sched::EPOCH_TICKS += 1;
-        if crate::sched::EPOCH_TICKS >= crate::sched::EPOCH_LENGTH {
+        *crate::sched::EPOCH_TICKS.get_mut() += 1;
+        if *crate::sched::EPOCH_TICKS.get() >= crate::sched::EPOCH_LENGTH {
             crate::sched::epoch_reset();
         }
 

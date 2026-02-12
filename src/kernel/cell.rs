@@ -1,0 +1,78 @@
+/// AegisOS KernelCell<T> — Safe encapsulation for kernel global state
+///
+/// Wraps `UnsafeCell<T>` with documented safety invariants for single-core
+/// kernel execution. Replaces `static mut` with a pattern that:
+/// 1. Makes Sync impl explicit (via `unsafe impl Sync`)
+/// 2. Requires `unsafe` at every access point
+/// 3. Centralizes the safety argument: single-core + interrupts masked
+///
+/// # Safety Invariant
+///
+/// KernelCell is only safe to use when ALL of these hold:
+/// - **Single-core execution**: QEMU virt with Cortex-A53 uniprocessor config
+/// - **No preemption**: Kernel code runs with interrupts masked (DAIF.I=1)
+///   during critical sections, or access is from a single execution context
+/// - **No re-entrancy**: The same KernelCell is not accessed recursively
+///
+/// These invariants are enforced by the AegisOS execution model:
+/// - Kernel runs at EL1, single-threaded
+/// - IRQ handler runs to completion before returning
+/// - `--test-threads=1` for host tests
+
+use core::cell::UnsafeCell;
+
+// ─── KernelCell<T> ─────────────────────────────────────────────────
+
+/// A transparent wrapper around `UnsafeCell<T>` for kernel global state.
+///
+/// Unlike `static mut`, every access requires an explicit `unsafe` block
+/// and a `// SAFETY:` comment — making the safety argument visible to
+/// auditors and formal verification tools.
+#[repr(transparent)]
+pub struct KernelCell<T>(UnsafeCell<T>);
+
+// SAFETY: KernelCell is only used in single-core kernel context.
+// All access occurs either:
+// - During boot (before interrupts enabled, no concurrency)
+// - In IRQ handler (runs to completion, single-core, no preemption)
+// - In host tests (--test-threads=1, sequential execution)
+unsafe impl<T> Sync for KernelCell<T> {}
+
+impl<T> KernelCell<T> {
+    /// Create a new KernelCell with the given initial value.
+    /// Usable in `static` declarations (const fn).
+    pub const fn new(val: T) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+
+    /// Get a shared reference to the inner value.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure single-core execution with no concurrent
+    /// mutable access (interrupts masked or single-threaded context).
+    #[inline(always)]
+    pub unsafe fn get(&self) -> &T {
+        // SAFETY: Caller guarantees no concurrent mutable access.
+        unsafe { &*self.0.get() }
+    }
+
+    /// Get a mutable reference to the inner value.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure single-core execution with no concurrent
+    /// access of any kind (interrupts masked or single-threaded context).
+    #[inline(always)]
+    pub unsafe fn get_mut(&self) -> &mut T {
+        // SAFETY: Caller guarantees exclusive access.
+        unsafe { &mut *self.0.get() }
+    }
+
+    /// Get raw pointer to the inner value. Does not require unsafe.
+    /// Useful for passing to FFI or performing atomic-like operations.
+    #[inline(always)]
+    pub const fn as_ptr(&self) -> *mut T {
+        self.0.get()
+    }
+}
