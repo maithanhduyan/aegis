@@ -40,6 +40,17 @@ echo ""
 # ─── Job 2: AArch64 Build + QEMU Boot ─────────────────────────────
 echo -e "${YELLOW}━━━ Job 2/2: QEMU Boot Test (AArch64) ━━━${NC}"
 
+echo -e "${YELLOW}Building user/hello ELF binary...${NC}"
+if (cd user/hello && cargo build --release \
+    -Zjson-target-spec \
+    -Zbuild-std=core \
+    -Zbuild-std-features=compiler-builtins-mem); then
+    echo -e "${GREEN}✓ user/hello built${NC}"
+else
+    echo -e "${RED}✗ user/hello build FAILED${NC}"
+    exit 2
+fi
+
 echo -e "${YELLOW}Building AArch64 kernel...${NC}"
 if cargo build --release \
     -Zjson-target-spec \

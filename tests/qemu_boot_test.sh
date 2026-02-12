@@ -40,8 +40,15 @@ check() {
     fi
 }
 
+# ─── Build user/hello ELF binary (needed by include_bytes!) ─────────
+echo -e "${YELLOW}[1/4] Building user/hello ELF binary...${NC}"
+if ! (cd user/hello && cargo build --release -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem) 2>&1; then
+    echo -e "${RED}user/hello build failed!${NC}"
+    exit 2
+fi
+
 # ─── Build kernel ───────────────────────────────────────────────────
-echo -e "${YELLOW}[1/3] Building kernel...${NC}"
+echo -e "${YELLOW}[2/4] Building kernel...${NC}"
 if ! cargo build --release -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem 2>&1; then
     echo -e "${RED}Build failed!${NC}"
     exit 2
@@ -53,7 +60,7 @@ if [ ! -f "$KERNEL" ]; then
 fi
 
 # ─── Run QEMU ──────────────────────────────────────────────────────
-echo -e "${YELLOW}[2/3] Running QEMU (timeout ${TIMEOUT_SEC}s)...${NC}"
+echo -e "${YELLOW}[3/4] Running QEMU (timeout ${TIMEOUT_SEC}s)...${NC}"
 OUTPUT=$(timeout "$TIMEOUT_SEC" "$QEMU" \
     -machine virt \
     -cpu cortex-a53 \
@@ -62,7 +69,7 @@ OUTPUT=$(timeout "$TIMEOUT_SEC" "$QEMU" \
     -kernel "$KERNEL" 2>&1 || true)
 
 # ─── Check boot checkpoints ────────────────────────────────────────
-echo -e "${YELLOW}[3/3] Checking boot checkpoints...${NC}"
+echo -e "${YELLOW}[4/4] Checking boot checkpoints...${NC}"
 
 check "Kernel boot message"         "[AegisOS] boot"
 check "MMU enabled"                 "[AegisOS] MMU enabled"

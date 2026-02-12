@@ -87,6 +87,14 @@ jobs:
           key: qemu-boot-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: qemu-boot-${{ runner.os }}-
 
+      - name: Build user/hello ELF binary
+        run: |
+          cd user/hello
+          cargo build --release \
+            -Zjson-target-spec \
+            -Zbuild-std=core \
+            -Zbuild-std-features=compiler-builtins-mem
+
       - name: Build AArch64 kernel
         run: |
           cargo build --release \
