@@ -12,6 +12,7 @@
 ///   SYS_GRANT_CREATE = 7: owner grants a page to a peer task
 ///   SYS_GRANT_REVOKE = 8: owner revokes peer's access
 
+use crate::kernel::cell::KernelCell;
 use crate::sched;
 use crate::uart_print;
 
@@ -47,7 +48,7 @@ pub const EMPTY_GRANT: Grant = Grant {
 
 // ─── Static grant table ────────────────────────────────────────────
 
-pub static mut GRANTS: [Grant; MAX_GRANTS] = [EMPTY_GRANT; MAX_GRANTS];
+pub static GRANTS: KernelCell<[Grant; MAX_GRANTS]> = KernelCell::new([EMPTY_GRANT; MAX_GRANTS]);
 
 // ─── Grant page addresses (from linker) ────────────────────────────
 
@@ -96,7 +97,7 @@ pub fn grant_create(grant_id: usize, owner: usize, peer: usize) -> u64 {
 
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
-        if GRANTS[grant_id].active {
+        if (*GRANTS.get_mut())[grant_id].active {
             uart_print("!!! GRANT: already active\n");
             return 0xFFFF_0002;
         }
@@ -123,7 +124,7 @@ pub fn grant_create(grant_id: usize, owner: usize, peer: usize) -> u64 {
             crate::mmu::map_grant_for_task(phys, peer);
         }
 
-        GRANTS[grant_id] = Grant {
+        (*GRANTS.get_mut())[grant_id] = Grant {
             owner: Some(owner),
             peer: Some(peer),
             phys_addr: phys,
@@ -155,25 +156,25 @@ pub fn grant_revoke(grant_id: usize, caller: usize) -> u64 {
 
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
-        if !GRANTS[grant_id].active {
+        if !(*GRANTS.get_mut())[grant_id].active {
             return 0; // no-op: already inactive
         }
 
-        if GRANTS[grant_id].owner != Some(caller) {
+        if (*GRANTS.get_mut())[grant_id].owner != Some(caller) {
             uart_print("!!! GRANT: caller is not owner\n");
             return 0xFFFF_0005;
         }
 
         // Unmap from peer's page table
-        if let Some(peer) = GRANTS[grant_id].peer {
+        if let Some(peer) = (*GRANTS.get_mut())[grant_id].peer {
             #[cfg(target_arch = "aarch64")]
             {
-                crate::mmu::unmap_grant_for_task(GRANTS[grant_id].phys_addr, peer);
+                crate::mmu::unmap_grant_for_task((*GRANTS.get_mut())[grant_id].phys_addr, peer);
             }
         }
 
-        GRANTS[grant_id].active = false;
-        GRANTS[grant_id].peer = None;
+        (*GRANTS.get_mut())[grant_id].active = false;
+        (*GRANTS.get_mut())[grant_id].peer = None;
 
         uart_print("[AegisOS] GRANT REVOKED: grant ");
         crate::uart_print_hex(grant_id as u64);
@@ -193,32 +194,32 @@ pub fn cleanup_task(task_idx: usize) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_GRANTS {
-            if !GRANTS[i].active {
+            if !(*GRANTS.get_mut())[i].active {
                 continue;
             }
 
-            if GRANTS[i].owner == Some(task_idx) {
+            if (*GRANTS.get_mut())[i].owner == Some(task_idx) {
                 // Task is owner — unmap peer and deactivate
-                if let Some(peer) = GRANTS[i].peer {
+                if let Some(peer) = (*GRANTS.get_mut())[i].peer {
                     #[cfg(target_arch = "aarch64")]
                     {
-                        crate::mmu::unmap_grant_for_task(GRANTS[i].phys_addr, peer);
+                        crate::mmu::unmap_grant_for_task((*GRANTS.get_mut())[i].phys_addr, peer);
                     }
                 }
                 // Also unmap from owner (faulted task gets fresh state on restart)
                 #[cfg(target_arch = "aarch64")]
                 {
-                    crate::mmu::unmap_grant_for_task(GRANTS[i].phys_addr, task_idx);
+                    crate::mmu::unmap_grant_for_task((*GRANTS.get_mut())[i].phys_addr, task_idx);
                 }
-                GRANTS[i] = EMPTY_GRANT;
-            } else if GRANTS[i].peer == Some(task_idx) {
+                (*GRANTS.get_mut())[i] = EMPTY_GRANT;
+            } else if (*GRANTS.get_mut())[i].peer == Some(task_idx) {
                 // Task is peer — unmap peer's access, keep owner's grant active but no peer
                 #[cfg(target_arch = "aarch64")]
                 {
-                    crate::mmu::unmap_grant_for_task(GRANTS[i].phys_addr, task_idx);
+                    crate::mmu::unmap_grant_for_task((*GRANTS.get_mut())[i].phys_addr, task_idx);
                 }
-                GRANTS[i].peer = None;
-                GRANTS[i].active = false;
+                (*GRANTS.get_mut())[i].peer = None;
+                (*GRANTS.get_mut())[i].active = false;
             }
         }
     }

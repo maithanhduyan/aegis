@@ -50,22 +50,22 @@ unsafe fn read_current() -> usize {
 unsafe fn reset_test_state() {
     // Reset TCBs
     for i in 0..NUM_TASKS {
-        sched::TCBS[i] = EMPTY_TCB;
-        sched::TCBS[i].id = i as u16;
-        sched::TCBS[i].state = TaskState::Ready;
+        (*sched::TCBS.get_mut())[i] = EMPTY_TCB;
+        (*sched::TCBS.get_mut())[i].id = i as u16;
+        (*sched::TCBS.get_mut())[i].state = TaskState::Ready;
         // Give each task a fake user stack top (won't be dereferenced in tests)
-        sched::TCBS[i].user_stack_top = 0x5000_0000 + ((i as u64 + 1) * 4096);
-        sched::TCBS[i].entry_point = 0x4008_0000 + (i as u64 * 0x100);
-        sched::TCBS[i].ttbr0 = 0;
-        sched::TCBS[i].notify_pending = 0;
-        sched::TCBS[i].notify_waiting = false;
+        (*sched::TCBS.get_mut())[i].user_stack_top = 0x5000_0000 + ((i as u64 + 1) * 4096);
+        (*sched::TCBS.get_mut())[i].entry_point = 0x4008_0000 + (i as u64 * 0x100);
+        (*sched::TCBS.get_mut())[i].ttbr0 = 0;
+        (*sched::TCBS.get_mut())[i].notify_pending = 0;
+        (*sched::TCBS.get_mut())[i].notify_waiting = false;
     }
     *sched::CURRENT.get_mut() = 0;
-    sched::TCBS[0].state = TaskState::Running;
+    (*sched::TCBS.get_mut())[0].state = TaskState::Running;
 
     // Reset IPC endpoints
     for i in 0..MAX_ENDPOINTS {
-        ipc::ENDPOINTS[i] = EMPTY_EP;
+        (*ipc::ENDPOINTS.get_mut())[i] = EMPTY_EP;
     }
 
     // Reset tick counter
@@ -73,12 +73,12 @@ unsafe fn reset_test_state() {
 
     // Reset grant table
     for i in 0..MAX_GRANTS {
-        grant::GRANTS[i] = EMPTY_GRANT;
+        (*grant::GRANTS.get_mut())[i] = EMPTY_GRANT;
     }
 
     // Reset IRQ bindings
     for i in 0..MAX_IRQ_BINDINGS {
-        irq::IRQ_BINDINGS[i] = EMPTY_BINDING;
+        (*irq::IRQ_BINDINGS.get_mut())[i] = EMPTY_BINDING;
     }
 }
 
@@ -439,13 +439,13 @@ fn sched_round_robin_all_ready() {
         for expected in 1..NUM_TASKS {
             sched::schedule(&mut frame);
             assert_eq!(read_current(), expected);
-            assert_eq!(sched::TCBS[expected].state, TaskState::Running);
+            assert_eq!((*sched::TCBS.get_mut())[expected].state, TaskState::Running);
         }
 
         // Wrap around to task 0
         sched::schedule(&mut frame);
         assert_eq!(read_current(), 0);
-        assert_eq!(sched::TCBS[0].state, TaskState::Running);
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Running);
     }
 }
 
@@ -455,8 +455,8 @@ fn sched_skip_faulted_task() {
         reset_test_state();
 
         // Fault task 1
-        sched::TCBS[1].state = TaskState::Faulted;
-        sched::TCBS[1].fault_tick = 0;
+        (*sched::TCBS.get_mut())[1].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[1].fault_tick = 0;
 
         // Task 0 is Running. schedule() should skip task 1, pick task 2
         let mut frame = TrapFrame {
@@ -472,7 +472,7 @@ fn sched_skip_blocked_task() {
     unsafe {
         reset_test_state();
 
-        sched::TCBS[1].state = TaskState::Blocked;
+        (*sched::TCBS.get_mut())[1].state = TaskState::Blocked;
 
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
@@ -489,10 +489,10 @@ fn sched_auto_restart_after_delay() {
         reset_test_state();
 
         // Fault task 1 at tick 0
-        sched::TCBS[1].state = TaskState::Faulted;
-        sched::TCBS[1].fault_tick = 0;
-        sched::TCBS[1].entry_point = 0x4008_0100;
-        sched::TCBS[1].user_stack_top = 0x5000_2000;
+        (*sched::TCBS.get_mut())[1].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[1].fault_tick = 0;
+        (*sched::TCBS.get_mut())[1].entry_point = 0x4008_0100;
+        (*sched::TCBS.get_mut())[1].user_stack_top = 0x5000_2000;
 
         // Set tick to just before restart threshold
         *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS - 1;
@@ -501,15 +501,15 @@ fn sched_auto_restart_after_delay() {
         };
         sched::schedule(&mut frame);
         // Task 1 should still be Faulted
-        assert_eq!(sched::TCBS[1].state, TaskState::Faulted);
+        assert_eq!((*sched::TCBS.get_mut())[1].state, TaskState::Faulted);
 
         // Set tick to exactly restart threshold
         *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
         sched::schedule(&mut frame);
         // Task 1 should now be Ready (restarted)
-        assert_eq!(sched::TCBS[1].state, TaskState::Ready);
-        assert_eq!(sched::TCBS[1].context.elr_el1, 0x4008_0100);
-        assert_eq!(sched::TCBS[1].context.spsr_el1, 0x000);
+        assert_eq!((*sched::TCBS.get_mut())[1].state, TaskState::Ready);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.elr_el1, 0x4008_0100);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.spsr_el1, 0x000);
     }
 }
 
@@ -520,10 +520,10 @@ fn sched_idle_fallback() {
 
         // Fault all tasks except idle (IDLE_TASK_ID)
         for i in 0..IDLE_TASK_ID {
-            sched::TCBS[i].state = TaskState::Faulted;
-            sched::TCBS[i].fault_tick = 0;
+            (*sched::TCBS.get_mut())[i].state = TaskState::Faulted;
+            (*sched::TCBS.get_mut())[i].fault_tick = 0;
         }
-        sched::TCBS[IDLE_TASK_ID].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[IDLE_TASK_ID].state = TaskState::Running;
         *sched::CURRENT.get_mut() = IDLE_TASK_ID;
 
         let mut frame = TrapFrame {
@@ -541,16 +541,16 @@ fn sched_context_save_restore() {
         reset_test_state();
 
         // Set up a distinctive context for task 0
-        sched::TCBS[0].context.x[0] = 0xDEAD_BEEF;
-        sched::TCBS[0].context.x[7] = 0x0000_0042;
-        sched::TCBS[0].context.elr_el1 = 0x4008_1000;
-        sched::TCBS[0].context.spsr_el1 = 0x000;
-        sched::TCBS[0].context.sp_el0 = 0x5000_1000;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0xDEAD_BEEF;
+        (*sched::TCBS.get_mut())[0].context.x[7] = 0x0000_0042;
+        (*sched::TCBS.get_mut())[0].context.elr_el1 = 0x4008_1000;
+        (*sched::TCBS.get_mut())[0].context.spsr_el1 = 0x000;
+        (*sched::TCBS.get_mut())[0].context.sp_el0 = 0x5000_1000;
 
         // Set up task 1 with different context
-        sched::TCBS[1].context.x[0] = 0xCAFE_BABE;
-        sched::TCBS[1].context.elr_el1 = 0x4008_2000;
-        sched::TCBS[1].context.sp_el0 = 0x5000_2000;
+        (*sched::TCBS.get_mut())[1].context.x[0] = 0xCAFE_BABE;
+        (*sched::TCBS.get_mut())[1].context.elr_el1 = 0x4008_2000;
+        (*sched::TCBS.get_mut())[1].context.sp_el0 = 0x5000_2000;
 
         // Create frame matching task 0's context
         let mut frame = TrapFrame {
@@ -570,8 +570,8 @@ fn sched_context_save_restore() {
         assert_eq!(frame.sp_el0, 0x5000_2000);
 
         // Task 0's TCB should have the saved context
-        assert_eq!(sched::TCBS[0].context.x[0], 0xDEAD_BEEF);
-        assert_eq!(sched::TCBS[0].context.x[7], 0x0000_0042);
+        assert_eq!((*sched::TCBS.get_mut())[0].context.x[0], 0xDEAD_BEEF);
+        assert_eq!((*sched::TCBS.get_mut())[0].context.x[7], 0x0000_0042);
     }
 }
 
@@ -610,10 +610,10 @@ fn sched_save_load_frame() {
         };
 
         sched::save_frame(1, &src_frame);
-        assert_eq!(sched::TCBS[1].context.x[0], 0x1111);
-        assert_eq!(sched::TCBS[1].context.x[1], 0x2222);
-        assert_eq!(sched::TCBS[1].context.x[30], 0x3333);
-        assert_eq!(sched::TCBS[1].context.elr_el1, 0x4000);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[0], 0x1111);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[1], 0x2222);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[30], 0x3333);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.elr_el1, 0x4000);
 
         let mut dst_frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
@@ -634,9 +634,9 @@ fn ipc_cleanup_clears_sender_slot() {
     unsafe {
         reset_test_state();
 
-        ipc::ENDPOINTS[0].sender_queue.push(1);
+        (*ipc::ENDPOINTS.get_mut())[0].sender_queue.push(1);
         ipc::cleanup_task(1);
-        assert!(!ipc::ENDPOINTS[0].sender_queue.contains(1));
+        assert!(!(*ipc::ENDPOINTS.get_mut())[0].sender_queue.contains(1));
     }
 }
 
@@ -645,9 +645,9 @@ fn ipc_cleanup_clears_receiver_slot() {
     unsafe {
         reset_test_state();
 
-        ipc::ENDPOINTS[0].receiver = Some(1);
+        (*ipc::ENDPOINTS.get_mut())[0].receiver = Some(1);
         ipc::cleanup_task(1);
-        assert_eq!(ipc::ENDPOINTS[0].receiver, None);
+        assert_eq!((*ipc::ENDPOINTS.get_mut())[0].receiver, None);
     }
 }
 
@@ -656,11 +656,11 @@ fn ipc_cleanup_clears_both_endpoints() {
     unsafe {
         reset_test_state();
 
-        ipc::ENDPOINTS[0].sender_queue.push(1);
-        ipc::ENDPOINTS[1].receiver = Some(1);
+        (*ipc::ENDPOINTS.get_mut())[0].sender_queue.push(1);
+        (*ipc::ENDPOINTS.get_mut())[1].receiver = Some(1);
         ipc::cleanup_task(1);
-        assert!(!ipc::ENDPOINTS[0].sender_queue.contains(1));
-        assert_eq!(ipc::ENDPOINTS[1].receiver, None);
+        assert!(!(*ipc::ENDPOINTS.get_mut())[0].sender_queue.contains(1));
+        assert_eq!((*ipc::ENDPOINTS.get_mut())[1].receiver, None);
     }
 }
 
@@ -669,17 +669,17 @@ fn ipc_cleanup_doesnt_affect_other_tasks() {
     unsafe {
         reset_test_state();
 
-        ipc::ENDPOINTS[0].sender_queue.push(0);
-        ipc::ENDPOINTS[0].receiver = Some(2);
-        ipc::ENDPOINTS[1].sender_queue.push(1);
+        (*ipc::ENDPOINTS.get_mut())[0].sender_queue.push(0);
+        (*ipc::ENDPOINTS.get_mut())[0].receiver = Some(2);
+        (*ipc::ENDPOINTS.get_mut())[1].sender_queue.push(1);
 
         ipc::cleanup_task(1);
 
         // Task 0 and 2 slots should be untouched
-        assert!(ipc::ENDPOINTS[0].sender_queue.contains(0));
-        assert_eq!(ipc::ENDPOINTS[0].receiver, Some(2));
+        assert!((*ipc::ENDPOINTS.get_mut())[0].sender_queue.contains(0));
+        assert_eq!((*ipc::ENDPOINTS.get_mut())[0].receiver, Some(2));
         // Task 1 slot should be cleared
-        assert!(!ipc::ENDPOINTS[1].sender_queue.contains(1));
+        assert!(!(*ipc::ENDPOINTS.get_mut())[1].sender_queue.contains(1));
     }
 }
 
@@ -894,22 +894,22 @@ fn cap_survives_restart_simulation() {
     unsafe {
         reset_test_state();
         let original_caps = CAP_IPC_SEND_EP0 | CAP_WRITE | CAP_YIELD;
-        sched::TCBS[0].caps = original_caps;
-        sched::TCBS[0].state = TaskState::Faulted;
-        sched::TCBS[0].fault_tick = 0;
+        (*sched::TCBS.get_mut())[0].caps = original_caps;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[0].fault_tick = 0;
 
         // Simulate what restart_task() does: zero context, reload entry/stack
-        sched::TCBS[0].context = TrapFrame {
+        (*sched::TCBS.get_mut())[0].context = TrapFrame {
             x: [0; 31],
-            sp_el0: sched::TCBS[0].user_stack_top,
-            elr_el1: sched::TCBS[0].entry_point,
+            sp_el0: (*sched::TCBS.get_mut())[0].user_stack_top,
+            elr_el1: (*sched::TCBS.get_mut())[0].entry_point,
             spsr_el1: 0x000,
             _pad: [0; 2],
         };
-        sched::TCBS[0].state = TaskState::Ready;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Ready;
 
         // Caps must still be the original value
-        assert_eq!(sched::TCBS[0].caps, original_caps,
+        assert_eq!((*sched::TCBS.get_mut())[0].caps, original_caps,
             "caps must survive task restart");
     }
 }
@@ -997,22 +997,22 @@ fn addr_ttbr0_survives_restart() {
     unsafe {
         reset_test_state();
         let original_ttbr0 = mmu::ttbr0_for_task(0, 1);
-        sched::TCBS[0].ttbr0 = original_ttbr0;
-        sched::TCBS[0].caps = CAP_WRITE | CAP_YIELD;
-        sched::TCBS[0].state = TaskState::Faulted;
-        sched::TCBS[0].fault_tick = 0;
+        (*sched::TCBS.get_mut())[0].ttbr0 = original_ttbr0;
+        (*sched::TCBS.get_mut())[0].caps = CAP_WRITE | CAP_YIELD;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[0].fault_tick = 0;
 
         // Simulate restart_task: zero context, reload entry/stack
-        sched::TCBS[0].context = TrapFrame {
+        (*sched::TCBS.get_mut())[0].context = TrapFrame {
             x: [0; 31],
-            sp_el0: sched::TCBS[0].user_stack_top,
-            elr_el1: sched::TCBS[0].entry_point,
+            sp_el0: (*sched::TCBS.get_mut())[0].user_stack_top,
+            elr_el1: (*sched::TCBS.get_mut())[0].entry_point,
             spsr_el1: 0x000,
             _pad: [0; 2],
         };
-        sched::TCBS[0].state = TaskState::Ready;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Ready;
 
-        assert_eq!(sched::TCBS[0].ttbr0, original_ttbr0,
+        assert_eq!((*sched::TCBS.get_mut())[0].ttbr0, original_ttbr0,
             "ttbr0 must survive task restart");
     }
 }
@@ -1023,15 +1023,15 @@ fn addr_schedule_preserves_ttbr0_in_tcb() {
     unsafe {
         reset_test_state();
         for i in 0..NUM_TASKS {
-            sched::TCBS[i].ttbr0 = mmu::ttbr0_for_task(i, (i as u16) + 1);
+            (*sched::TCBS.get_mut())[i].ttbr0 = mmu::ttbr0_for_task(i, (i as u16) + 1);
         }
 
         // Schedule once (simulates timer tick)
         let mut frame = TrapFrame {
             x: [0; 31],
             sp_el0: 0,
-            elr_el1: sched::TCBS[0].context.elr_el1,
-            spsr_el1: sched::TCBS[0].context.spsr_el1,
+            elr_el1: (*sched::TCBS.get_mut())[0].context.elr_el1,
+            spsr_el1: (*sched::TCBS.get_mut())[0].context.spsr_el1,
             _pad: [0; 2],
         };
         sched::schedule(&mut frame);
@@ -1039,7 +1039,7 @@ fn addr_schedule_preserves_ttbr0_in_tcb() {
         // All ttbr0 values should be unchanged
         for i in 0..NUM_TASKS {
             let expected = mmu::ttbr0_for_task(i, (i as u16) + 1);
-            assert_eq!(sched::TCBS[i].ttbr0, expected,
+            assert_eq!((*sched::TCBS.get_mut())[i].ttbr0, expected,
                 "TCBS[{}].ttbr0 should be preserved after schedule", i);
         }
     }
@@ -1074,9 +1074,9 @@ fn notify_pending_or_merge() {
     unsafe {
         reset_test_state();
         // Simulate two notifications merging via OR
-        sched::TCBS[1].notify_pending |= 0x01;
-        sched::TCBS[1].notify_pending |= 0x04;
-        assert_eq!(sched::TCBS[1].notify_pending, 0x05);
+        (*sched::TCBS.get_mut())[1].notify_pending |= 0x01;
+        (*sched::TCBS.get_mut())[1].notify_pending |= 0x04;
+        assert_eq!((*sched::TCBS.get_mut())[1].notify_pending, 0x05);
     }
 }
 
@@ -1084,12 +1084,12 @@ fn notify_pending_or_merge() {
 fn notify_pending_cleared_on_read() {
     unsafe {
         reset_test_state();
-        sched::TCBS[0].notify_pending = 0xFF;
+        (*sched::TCBS.get_mut())[0].notify_pending = 0xFF;
         // Simulate wait_notify: read and clear
-        let pending = sched::TCBS[0].notify_pending;
-        sched::TCBS[0].notify_pending = 0;
+        let pending = (*sched::TCBS.get_mut())[0].notify_pending;
+        (*sched::TCBS.get_mut())[0].notify_pending = 0;
         assert_eq!(pending, 0xFF);
-        assert_eq!(sched::TCBS[0].notify_pending, 0);
+        assert_eq!((*sched::TCBS.get_mut())[0].notify_pending, 0);
     }
 }
 
@@ -1097,11 +1097,11 @@ fn notify_pending_cleared_on_read() {
 fn notify_waiting_flag() {
     unsafe {
         reset_test_state();
-        sched::TCBS[1].notify_waiting = true;
-        assert!(sched::TCBS[1].notify_waiting);
+        (*sched::TCBS.get_mut())[1].notify_waiting = true;
+        assert!((*sched::TCBS.get_mut())[1].notify_waiting);
         // Simulate notify delivery: clear waiting flag
-        sched::TCBS[1].notify_waiting = false;
-        assert!(!sched::TCBS[1].notify_waiting);
+        (*sched::TCBS.get_mut())[1].notify_waiting = false;
+        assert!(!(*sched::TCBS.get_mut())[1].notify_waiting);
     }
 }
 
@@ -1109,10 +1109,10 @@ fn notify_waiting_flag() {
 fn notify_cleared_on_restart() {
     unsafe {
         reset_test_state();
-        sched::TCBS[1].notify_pending = 0xABCD;
-        sched::TCBS[1].notify_waiting = true;
-        sched::TCBS[1].state = TaskState::Faulted;
-        sched::TCBS[1].fault_tick = 0;
+        (*sched::TCBS.get_mut())[1].notify_pending = 0xABCD;
+        (*sched::TCBS.get_mut())[1].notify_waiting = true;
+        (*sched::TCBS.get_mut())[1].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[1].fault_tick = 0;
 
         *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
         let mut frame = TrapFrame {
@@ -1121,9 +1121,9 @@ fn notify_cleared_on_restart() {
         sched::schedule(&mut frame);
 
         // After restart, notify state should be cleared
-        assert_eq!(sched::TCBS[1].notify_pending, 0,
+        assert_eq!((*sched::TCBS.get_mut())[1].notify_pending, 0,
             "notify_pending must be cleared on restart");
-        assert_eq!(sched::TCBS[1].notify_waiting, false,
+        assert_eq!((*sched::TCBS.get_mut())[1].notify_waiting, false,
             "notify_waiting must be cleared on restart");
     }
 }
@@ -1220,9 +1220,9 @@ fn ipc_four_endpoints_exist() {
         reset_test_state();
         // All 4 endpoints should be accessible and initially empty
         for i in 0..4 {
-            assert_eq!(ipc::ENDPOINTS[i].sender_queue.count, 0,
+            assert_eq!((*ipc::ENDPOINTS.get_mut())[i].sender_queue.count, 0,
                 "EP{} sender_queue should be empty", i);
-            assert_eq!(ipc::ENDPOINTS[i].receiver, None,
+            assert_eq!((*ipc::ENDPOINTS.get_mut())[i].receiver, None,
                 "EP{} receiver should be None", i);
         }
     }
@@ -1243,17 +1243,17 @@ fn ipc_cleanup_all_four_endpoints() {
     unsafe {
         reset_test_state();
         // Put task 1 in all 4 endpoints
-        ipc::ENDPOINTS[0].sender_queue.push(1);
-        ipc::ENDPOINTS[1].receiver = Some(1);
-        ipc::ENDPOINTS[2].sender_queue.push(1);
-        ipc::ENDPOINTS[3].receiver = Some(1);
+        (*ipc::ENDPOINTS.get_mut())[0].sender_queue.push(1);
+        (*ipc::ENDPOINTS.get_mut())[1].receiver = Some(1);
+        (*ipc::ENDPOINTS.get_mut())[2].sender_queue.push(1);
+        (*ipc::ENDPOINTS.get_mut())[3].receiver = Some(1);
 
         ipc::cleanup_task(1);
 
         for i in 0..4 {
-            assert!(!ipc::ENDPOINTS[i].sender_queue.contains(1),
+            assert!(!(*ipc::ENDPOINTS.get_mut())[i].sender_queue.contains(1),
                 "EP{} should not contain task 1 after cleanup", i);
-            assert_ne!(ipc::ENDPOINTS[i].receiver, Some(1),
+            assert_ne!((*ipc::ENDPOINTS.get_mut())[i].receiver, Some(1),
                 "EP{} receiver should not be task 1 after cleanup", i);
         }
     }
@@ -1269,10 +1269,10 @@ fn grant_create_success() {
         reset_test_state();
         let result = grant::grant_create(0, 0, 1);
         assert_eq!(result, 0, "grant_create should return 0 on success");
-        assert!(grant::GRANTS[0].active, "grant 0 should be active");
-        assert_eq!(grant::GRANTS[0].owner, Some(0));
-        assert_eq!(grant::GRANTS[0].peer, Some(1));
-        assert_ne!(grant::GRANTS[0].phys_addr, 0, "phys_addr should be non-zero");
+        assert!((*grant::GRANTS.get_mut())[0].active, "grant 0 should be active");
+        assert_eq!((*grant::GRANTS.get_mut())[0].owner, Some(0));
+        assert_eq!((*grant::GRANTS.get_mut())[0].peer, Some(1));
+        assert_ne!((*grant::GRANTS.get_mut())[0].phys_addr, 0, "phys_addr should be non-zero");
     }
 }
 
@@ -1321,8 +1321,8 @@ fn grant_revoke_by_owner() {
         grant::grant_create(0, 0, 1);
         let r = grant::grant_revoke(0, 0);
         assert_eq!(r, 0, "owner should be able to revoke");
-        assert!(!grant::GRANTS[0].active, "grant should be inactive after revoke");
-        assert_eq!(grant::GRANTS[0].peer, None, "peer should be None after revoke");
+        assert!(!(*grant::GRANTS.get_mut())[0].active, "grant should be inactive after revoke");
+        assert_eq!((*grant::GRANTS.get_mut())[0].peer, None, "peer should be None after revoke");
         // Owner is still recorded so it can re-create later
     }
 }
@@ -1334,7 +1334,7 @@ fn grant_revoke_by_non_owner_rejected() {
         grant::grant_create(0, 0, 1);
         let r = grant::grant_revoke(0, 1);
         assert_eq!(r, 0xFFFF_0005, "non-owner revoke should fail");
-        assert!(grant::GRANTS[0].active, "grant should remain active");
+        assert!((*grant::GRANTS.get_mut())[0].active, "grant should remain active");
     }
 }
 
@@ -1364,12 +1364,12 @@ fn grant_cleanup_owner_faulted() {
         grant::grant_create(1, 0, 2);
         // Task 0 faults — all its grants should be cleared
         grant::cleanup_task(0);
-        assert!(!grant::GRANTS[0].active);
-        assert_eq!(grant::GRANTS[0].owner, None);
-        assert_eq!(grant::GRANTS[0].peer, None);
-        assert!(!grant::GRANTS[1].active);
-        assert_eq!(grant::GRANTS[1].owner, None);
-        assert_eq!(grant::GRANTS[1].peer, None);
+        assert!(!(*grant::GRANTS.get_mut())[0].active);
+        assert_eq!((*grant::GRANTS.get_mut())[0].owner, None);
+        assert_eq!((*grant::GRANTS.get_mut())[0].peer, None);
+        assert!(!(*grant::GRANTS.get_mut())[1].active);
+        assert_eq!((*grant::GRANTS.get_mut())[1].owner, None);
+        assert_eq!((*grant::GRANTS.get_mut())[1].peer, None);
     }
 }
 
@@ -1380,10 +1380,10 @@ fn grant_cleanup_peer_faulted() {
         grant::grant_create(0, 0, 1);
         // Task 1 (peer) faults — peer access removed, grant deactivated
         grant::cleanup_task(1);
-        assert!(!grant::GRANTS[0].active, "grant should be inactive after peer fault");
-        assert_eq!(grant::GRANTS[0].peer, None, "peer should be None");
+        assert!(!(*grant::GRANTS.get_mut())[0].active, "grant should be inactive after peer fault");
+        assert_eq!((*grant::GRANTS.get_mut())[0].peer, None, "peer should be None");
         // Owner field preserved (EMPTY_GRANT clears it only when owner faults)
-        assert_eq!(grant::GRANTS[0].owner, Some(0), "owner should be preserved");
+        assert_eq!((*grant::GRANTS.get_mut())[0].owner, Some(0), "owner should be preserved");
     }
 }
 
@@ -1424,14 +1424,14 @@ fn grant_two_grants_independent() {
         let r1 = grant::grant_create(1, 1, 2);
         assert_eq!(r0, 0);
         assert_eq!(r1, 0);
-        assert!(grant::GRANTS[0].active);
-        assert!(grant::GRANTS[1].active);
-        assert_ne!(grant::GRANTS[0].phys_addr, grant::GRANTS[1].phys_addr);
+        assert!((*grant::GRANTS.get_mut())[0].active);
+        assert!((*grant::GRANTS.get_mut())[1].active);
+        assert_ne!((*grant::GRANTS.get_mut())[0].phys_addr, (*grant::GRANTS.get_mut())[1].phys_addr);
 
         // Revoke one doesn't affect the other
         grant::grant_revoke(0, 0);
-        assert!(!grant::GRANTS[0].active);
-        assert!(grant::GRANTS[1].active, "grant 1 should be unaffected");
+        assert!(!(*grant::GRANTS.get_mut())[0].active);
+        assert!((*grant::GRANTS.get_mut())[1].active, "grant 1 should be unaffected");
     }
 }
 
@@ -1444,8 +1444,8 @@ fn grant_re_create_after_revoke() {
         // Should be able to re-create the same grant slot
         let r = grant::grant_create(0, 1, 2);
         assert_eq!(r, 0, "re-create after revoke should succeed");
-        assert_eq!(grant::GRANTS[0].owner, Some(1));
-        assert_eq!(grant::GRANTS[0].peer, Some(2));
+        assert_eq!((*grant::GRANTS.get_mut())[0].owner, Some(1));
+        assert_eq!((*grant::GRANTS.get_mut())[0].peer, Some(2));
     }
 }
 
@@ -1459,11 +1459,11 @@ fn irq_bind_success() {
         reset_test_state();
         let r = irq::irq_bind(33, 0, 0x01);
         assert_eq!(r, 0, "irq_bind should succeed for SPI INTID 33");
-        assert!(irq::IRQ_BINDINGS[0].active);
-        assert_eq!(irq::IRQ_BINDINGS[0].intid, 33);
-        assert_eq!(irq::IRQ_BINDINGS[0].task_id, 0);
-        assert_eq!(irq::IRQ_BINDINGS[0].notify_bit, 0x01);
-        assert!(!irq::IRQ_BINDINGS[0].pending_ack);
+        assert!((*irq::IRQ_BINDINGS.get_mut())[0].active);
+        assert_eq!((*irq::IRQ_BINDINGS.get_mut())[0].intid, 33);
+        assert_eq!((*irq::IRQ_BINDINGS.get_mut())[0].task_id, 0);
+        assert_eq!((*irq::IRQ_BINDINGS.get_mut())[0].notify_bit, 0x01);
+        assert!(!(*irq::IRQ_BINDINGS.get_mut())[0].pending_ack);
     }
 }
 
@@ -1519,10 +1519,10 @@ fn irq_ack_success() {
         reset_test_state();
         irq::irq_bind(33, 0, 0x01);
         // Simulate IRQ fired: set pending_ack manually
-        irq::IRQ_BINDINGS[0].pending_ack = true;
+        (*irq::IRQ_BINDINGS.get_mut())[0].pending_ack = true;
         let r = irq::irq_ack(33, 0);
         assert_eq!(r, 0);
-        assert!(!irq::IRQ_BINDINGS[0].pending_ack, "pending_ack should be cleared");
+        assert!(!(*irq::IRQ_BINDINGS.get_mut())[0].pending_ack, "pending_ack should be cleared");
     }
 }
 
@@ -1531,7 +1531,7 @@ fn irq_ack_wrong_task() {
     unsafe {
         reset_test_state();
         irq::irq_bind(33, 0, 0x01);
-        irq::IRQ_BINDINGS[0].pending_ack = true;
+        (*irq::IRQ_BINDINGS.get_mut())[0].pending_ack = true;
         let r = irq::irq_ack(33, 1); // task 1 didn't bind this
         assert_eq!(r, irq::ERR_NOT_OWNER);
     }
@@ -1564,9 +1564,9 @@ fn irq_route_sets_notify_pending() {
         irq::irq_bind(33, 0, 0x01);
         // Simulate IRQ routing via host-test stub
         irq::irq_route_test(33, 0);
-        assert_eq!(sched::TCBS[0].notify_pending, 0x01,
+        assert_eq!((*sched::TCBS.get_mut())[0].notify_pending, 0x01,
             "notify_pending should have the bound bit set");
-        assert!(irq::IRQ_BINDINGS[0].pending_ack, "pending_ack should be true");
+        assert!((*irq::IRQ_BINDINGS.get_mut())[0].pending_ack, "pending_ack should be true");
     }
 }
 
@@ -1576,15 +1576,15 @@ fn irq_route_unblocks_waiting_task() {
         reset_test_state();
         irq::irq_bind(33, 0, 0x01);
         // Task 0 is waiting for notifications
-        sched::TCBS[0].state = TaskState::Blocked;
-        sched::TCBS[0].notify_waiting = true;
-        sched::TCBS[0].notify_pending = 0;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Blocked;
+        (*sched::TCBS.get_mut())[0].notify_waiting = true;
+        (*sched::TCBS.get_mut())[0].notify_pending = 0;
         // Fire IRQ
         irq::irq_route_test(33, 0);
-        assert_eq!(sched::TCBS[0].state, TaskState::Ready, "task should be unblocked");
-        assert!(!sched::TCBS[0].notify_waiting, "notify_waiting should be cleared");
-        assert_eq!(sched::TCBS[0].context.x[0], 0x01, "delivered bits should be in x0");
-        assert_eq!(sched::TCBS[0].notify_pending, 0, "pending should be cleared after delivery");
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Ready, "task should be unblocked");
+        assert!(!(*sched::TCBS.get_mut())[0].notify_waiting, "notify_waiting should be cleared");
+        assert_eq!((*sched::TCBS.get_mut())[0].context.x[0], 0x01, "delivered bits should be in x0");
+        assert_eq!((*sched::TCBS.get_mut())[0].notify_pending, 0, "pending should be cleared after delivery");
     }
 }
 
@@ -1596,11 +1596,11 @@ fn irq_route_accumulates_bits() {
         irq::irq_bind(34, 0, 0x02);
         // Set pending_ack=false so we can route both (in practice kernel masks)
         irq::irq_route_test(33, 0);
-        irq::IRQ_BINDINGS[0].pending_ack = false; // pretend ACK'd
-        sched::TCBS[0].notify_pending = 0x01; // kept from first route
+        (*irq::IRQ_BINDINGS.get_mut())[0].pending_ack = false; // pretend ACK'd
+        (*sched::TCBS.get_mut())[0].notify_pending = 0x01; // kept from first route
         irq::irq_route_test(34, 0);
         // Both bits should be accumulated
-        assert_eq!(sched::TCBS[0].notify_pending, 0x01 | 0x02);
+        assert_eq!((*sched::TCBS.get_mut())[0].notify_pending, 0x01 | 0x02);
     }
 }
 
@@ -1610,10 +1610,10 @@ fn irq_cleanup_unbinds_all() {
         reset_test_state();
         irq::irq_bind(33, 0, 0x01);
         irq::irq_bind(34, 0, 0x02);
-        irq::IRQ_BINDINGS[0].pending_ack = true;
+        (*irq::IRQ_BINDINGS.get_mut())[0].pending_ack = true;
         irq::irq_cleanup_task(0);
         for i in 0..MAX_IRQ_BINDINGS {
-            assert!(!irq::IRQ_BINDINGS[i].active,
+            assert!(!(*irq::IRQ_BINDINGS.get_mut())[i].active,
                 "binding {} should be inactive after cleanup", i);
         }
     }
@@ -1626,8 +1626,8 @@ fn irq_cleanup_does_not_affect_other_tasks() {
         irq::irq_bind(33, 0, 0x01);
         irq::irq_bind(34, 1, 0x02);
         irq::irq_cleanup_task(0);
-        assert!(!irq::IRQ_BINDINGS[0].active, "task 0 binding should be cleaned");
-        assert!(irq::IRQ_BINDINGS[1].active, "task 1 binding should remain");
+        assert!(!(*irq::IRQ_BINDINGS.get_mut())[0].active, "task 0 binding should be cleaned");
+        assert!((*irq::IRQ_BINDINGS.get_mut())[1].active, "task 1 binding should remain");
     }
 }
 
@@ -1652,7 +1652,7 @@ fn irq_rebind_after_cleanup() {
         // Should be able to rebind same INTID to different task
         let r = irq::irq_bind(33, 1, 0x04);
         assert_eq!(r, 0, "rebind after cleanup should succeed");
-        assert_eq!(irq::IRQ_BINDINGS[0].task_id, 1);
+        assert_eq!((*irq::IRQ_BINDINGS.get_mut())[0].task_id, 1);
     }
 }
 
@@ -1747,12 +1747,12 @@ fn sched_priority_higher_wins() {
         // Task 0 (Running), priority=2
         // Task 1 (Ready), priority=5
         // Task 2 (Ready), priority=1
-        sched::TCBS[0].priority = 2;
-        sched::TCBS[0].base_priority = 2;
-        sched::TCBS[1].priority = 5;
-        sched::TCBS[1].base_priority = 5;
-        sched::TCBS[2].priority = 1;
-        sched::TCBS[2].base_priority = 1;
+        (*sched::TCBS.get_mut())[0].priority = 2;
+        (*sched::TCBS.get_mut())[0].base_priority = 2;
+        (*sched::TCBS.get_mut())[1].priority = 5;
+        (*sched::TCBS.get_mut())[1].base_priority = 5;
+        (*sched::TCBS.get_mut())[2].priority = 1;
+        (*sched::TCBS.get_mut())[2].base_priority = 1;
 
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
@@ -1761,7 +1761,7 @@ fn sched_priority_higher_wins() {
 
         // Should pick task 1 (priority=5, highest among Ready tasks)
         assert_eq!(read_current(), 1);
-        assert_eq!(sched::TCBS[1].state, TaskState::Running);
+        assert_eq!((*sched::TCBS.get_mut())[1].state, TaskState::Running);
     }
 }
 
@@ -1772,8 +1772,8 @@ fn sched_same_priority_round_robin() {
 
         // All tasks at same priority
         for i in 0..NUM_TASKS {
-            sched::TCBS[i].priority = 3;
-            sched::TCBS[i].base_priority = 3;
+            (*sched::TCBS.get_mut())[i].priority = 3;
+            (*sched::TCBS.get_mut())[i].base_priority = 3;
         }
 
         let mut frame = TrapFrame {
@@ -1798,19 +1798,19 @@ fn sched_budget_exhausted_skips_task() {
         reset_test_state();
 
         // Task 1: priority=5, budget=50, used=50 (exhausted)
-        sched::TCBS[1].priority = 5;
-        sched::TCBS[1].base_priority = 5;
-        sched::TCBS[1].time_budget = 50;
-        sched::TCBS[1].ticks_used = 50;
+        (*sched::TCBS.get_mut())[1].priority = 5;
+        (*sched::TCBS.get_mut())[1].base_priority = 5;
+        (*sched::TCBS.get_mut())[1].time_budget = 50;
+        (*sched::TCBS.get_mut())[1].ticks_used = 50;
 
         // Task 2: priority=1, unlimited budget
-        sched::TCBS[2].priority = 1;
-        sched::TCBS[2].base_priority = 1;
-        sched::TCBS[2].time_budget = 0;
+        (*sched::TCBS.get_mut())[2].priority = 1;
+        (*sched::TCBS.get_mut())[2].base_priority = 1;
+        (*sched::TCBS.get_mut())[2].time_budget = 0;
 
         // Task 0: Running, priority=3
-        sched::TCBS[0].priority = 3;
-        sched::TCBS[0].base_priority = 3;
+        (*sched::TCBS.get_mut())[0].priority = 3;
+        (*sched::TCBS.get_mut())[0].base_priority = 3;
 
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
@@ -1832,10 +1832,10 @@ fn sched_unlimited_budget_never_exhausted() {
         reset_test_state();
 
         // Task with budget=0 (unlimited) should run even with high ticks_used
-        sched::TCBS[1].priority = 5;
-        sched::TCBS[1].base_priority = 5;
-        sched::TCBS[1].time_budget = 0;
-        sched::TCBS[1].ticks_used = 999999;
+        (*sched::TCBS.get_mut())[1].priority = 5;
+        (*sched::TCBS.get_mut())[1].base_priority = 5;
+        (*sched::TCBS.get_mut())[1].time_budget = 0;
+        (*sched::TCBS.get_mut())[1].ticks_used = 999999;
 
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
@@ -1854,16 +1854,16 @@ fn sched_epoch_reset_clears_ticks() {
     unsafe {
         reset_test_state();
 
-        sched::TCBS[0].ticks_used = 42;
-        sched::TCBS[1].ticks_used = 50;
-        sched::TCBS[2].ticks_used = 10;
+        (*sched::TCBS.get_mut())[0].ticks_used = 42;
+        (*sched::TCBS.get_mut())[1].ticks_used = 50;
+        (*sched::TCBS.get_mut())[2].ticks_used = 10;
         *sched::EPOCH_TICKS.get_mut() = 99;
 
         sched::epoch_reset();
 
         assert_eq!(*sched::EPOCH_TICKS.get(), 0, "epoch counter should reset");
         for i in 0..NUM_TASKS {
-            assert_eq!(sched::TCBS[i].ticks_used, 0,
+            assert_eq!((*sched::TCBS.get_mut())[i].ticks_used, 0,
                 "task {} ticks_used should be reset", i);
         }
     }
@@ -1899,8 +1899,8 @@ fn sched_record_heartbeat() {
         reset_test_state();
         *aegis_os::timer::TICK_COUNT.get_mut() = 42;
         sched::record_heartbeat(0, 50);
-        assert_eq!(sched::TCBS[0].heartbeat_interval, 50);
-        assert_eq!(sched::TCBS[0].last_heartbeat, 42);
+        assert_eq!((*sched::TCBS.get_mut())[0].heartbeat_interval, 50);
+        assert_eq!((*sched::TCBS.get_mut())[0].last_heartbeat, 42);
     }
 }
 
@@ -1908,9 +1908,9 @@ fn sched_record_heartbeat() {
 fn sched_record_heartbeat_disable() {
     unsafe {
         reset_test_state();
-        sched::TCBS[0].heartbeat_interval = 50;
+        (*sched::TCBS.get_mut())[0].heartbeat_interval = 50;
         sched::record_heartbeat(0, 0);
-        assert_eq!(sched::TCBS[0].heartbeat_interval, 0, "interval 0 disables watchdog");
+        assert_eq!((*sched::TCBS.get_mut())[0].heartbeat_interval, 0, "interval 0 disables watchdog");
     }
 }
 
@@ -1920,13 +1920,13 @@ fn sched_watchdog_scan_no_violation() {
         reset_test_state();
 
         // Task 0: heartbeat interval=50, last=10, now=40 → elapsed=30 < 50 → OK
-        sched::TCBS[0].heartbeat_interval = 50;
-        sched::TCBS[0].last_heartbeat = 10;
+        (*sched::TCBS.get_mut())[0].heartbeat_interval = 50;
+        (*sched::TCBS.get_mut())[0].last_heartbeat = 10;
         *aegis_os::timer::TICK_COUNT.get_mut() = 40;
 
         sched::watchdog_scan();
 
-        assert_ne!(sched::TCBS[0].state, TaskState::Faulted,
+        assert_ne!((*sched::TCBS.get_mut())[0].state, TaskState::Faulted,
             "task should not be faulted (heartbeat within interval)");
     }
 }
@@ -1937,18 +1937,18 @@ fn sched_watchdog_scan_violation_faults_task() {
         reset_test_state();
 
         // Task 1: heartbeat interval=50, last=10, now=70 → elapsed=60 > 50 → FAULT
-        sched::TCBS[1].heartbeat_interval = 50;
-        sched::TCBS[1].last_heartbeat = 10;
-        sched::TCBS[1].priority = 5;
-        sched::TCBS[1].base_priority = 3;
+        (*sched::TCBS.get_mut())[1].heartbeat_interval = 50;
+        (*sched::TCBS.get_mut())[1].last_heartbeat = 10;
+        (*sched::TCBS.get_mut())[1].priority = 5;
+        (*sched::TCBS.get_mut())[1].base_priority = 3;
         *aegis_os::timer::TICK_COUNT.get_mut() = 70;
 
         sched::watchdog_scan();
 
-        assert_eq!(sched::TCBS[1].state, TaskState::Faulted,
+        assert_eq!((*sched::TCBS.get_mut())[1].state, TaskState::Faulted,
             "task should be faulted (heartbeat expired)");
-        assert_eq!(sched::TCBS[1].fault_tick, 70);
-        assert_eq!(sched::TCBS[1].priority, sched::TCBS[1].base_priority,
+        assert_eq!((*sched::TCBS.get_mut())[1].fault_tick, 70);
+        assert_eq!((*sched::TCBS.get_mut())[1].priority, (*sched::TCBS.get_mut())[1].base_priority,
             "priority should be restored to base on fault");
     }
 }
@@ -1959,13 +1959,13 @@ fn sched_watchdog_scan_skips_disabled() {
         reset_test_state();
 
         // Task with heartbeat_interval=0 (disabled) should never be faulted
-        sched::TCBS[0].heartbeat_interval = 0;
-        sched::TCBS[0].last_heartbeat = 0;
+        (*sched::TCBS.get_mut())[0].heartbeat_interval = 0;
+        (*sched::TCBS.get_mut())[0].last_heartbeat = 0;
         *aegis_os::timer::TICK_COUNT.get_mut() = 1000;
 
         sched::watchdog_scan();
 
-        assert_ne!(sched::TCBS[0].state, TaskState::Faulted,
+        assert_ne!((*sched::TCBS.get_mut())[0].state, TaskState::Faulted,
             "disabled watchdog should not fault task");
     }
 }
@@ -1975,16 +1975,16 @@ fn sched_watchdog_scan_skips_already_faulted() {
     unsafe {
         reset_test_state();
 
-        sched::TCBS[0].heartbeat_interval = 50;
-        sched::TCBS[0].last_heartbeat = 0;
-        sched::TCBS[0].state = TaskState::Faulted;
-        sched::TCBS[0].fault_tick = 5;
+        (*sched::TCBS.get_mut())[0].heartbeat_interval = 50;
+        (*sched::TCBS.get_mut())[0].last_heartbeat = 0;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[0].fault_tick = 5;
         *aegis_os::timer::TICK_COUNT.get_mut() = 100;
 
         sched::watchdog_scan();
 
         // fault_tick should not be updated (task already faulted)
-        assert_eq!(sched::TCBS[0].fault_tick, 5,
+        assert_eq!((*sched::TCBS.get_mut())[0].fault_tick, 5,
             "already-faulted task should not be re-faulted");
     }
 }
@@ -2028,9 +2028,9 @@ fn cap_name_heartbeat() {
 fn sched_set_task_priority() {
     unsafe {
         reset_test_state();
-        sched::TCBS[0].priority = 2;
+        (*sched::TCBS.get_mut())[0].priority = 2;
         sched::set_task_priority(0, 7);
-        assert_eq!(sched::TCBS[0].priority, 7);
+        assert_eq!((*sched::TCBS.get_mut())[0].priority, 7);
     }
 }
 
@@ -2038,7 +2038,7 @@ fn sched_set_task_priority() {
 fn sched_get_task_priority() {
     unsafe {
         reset_test_state();
-        sched::TCBS[1].priority = 5;
+        (*sched::TCBS.get_mut())[1].priority = 5;
         assert_eq!(sched::get_task_priority(1), 5);
     }
 }
@@ -2047,8 +2047,8 @@ fn sched_get_task_priority() {
 fn sched_get_task_base_priority() {
     unsafe {
         reset_test_state();
-        sched::TCBS[1].base_priority = 3;
-        sched::TCBS[1].priority = 7; // boosted
+        (*sched::TCBS.get_mut())[1].base_priority = 3;
+        (*sched::TCBS.get_mut())[1].priority = 7; // boosted
         assert_eq!(sched::get_task_base_priority(1), 3);
     }
 }
@@ -2057,10 +2057,10 @@ fn sched_get_task_base_priority() {
 fn sched_restore_base_priority() {
     unsafe {
         reset_test_state();
-        sched::TCBS[0].base_priority = 2;
-        sched::TCBS[0].priority = 7; // boosted by inheritance
+        (*sched::TCBS.get_mut())[0].base_priority = 2;
+        (*sched::TCBS.get_mut())[0].priority = 7; // boosted by inheritance
         sched::restore_base_priority(0);
-        assert_eq!(sched::TCBS[0].priority, 2, "priority should be restored to base");
+        assert_eq!((*sched::TCBS.get_mut())[0].priority, 2, "priority should be restored to base");
     }
 }
 
@@ -2068,10 +2068,10 @@ fn sched_restore_base_priority() {
 fn sched_priority_restored_on_fault() {
     unsafe {
         reset_test_state();
-        sched::TCBS[0].base_priority = 2;
-        sched::TCBS[0].priority = 7; // boosted by inheritance
-        sched::TCBS[0].state = TaskState::Faulted;
-        sched::TCBS[0].fault_tick = 0;
+        (*sched::TCBS.get_mut())[0].base_priority = 2;
+        (*sched::TCBS.get_mut())[0].priority = 7; // boosted by inheritance
+        (*sched::TCBS.get_mut())[0].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[0].fault_tick = 0;
 
         // Simulate restart
         *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
@@ -2080,7 +2080,7 @@ fn sched_priority_restored_on_fault() {
         };
         sched::schedule(&mut frame);
 
-        assert_eq!(sched::TCBS[0].priority, 2,
+        assert_eq!((*sched::TCBS.get_mut())[0].priority, 2,
             "priority should be restored to base after restart");
     }
 }
@@ -2100,9 +2100,9 @@ fn sched_out_of_range_set_priority_is_noop() {
 fn sched_ticks_used_reset_on_restart() {
     unsafe {
         reset_test_state();
-        sched::TCBS[1].ticks_used = 42;
-        sched::TCBS[1].state = TaskState::Faulted;
-        sched::TCBS[1].fault_tick = 0;
+        (*sched::TCBS.get_mut())[1].ticks_used = 42;
+        (*sched::TCBS.get_mut())[1].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[1].fault_tick = 0;
 
         *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
         let mut frame = TrapFrame {
@@ -2110,7 +2110,7 @@ fn sched_ticks_used_reset_on_restart() {
         };
         sched::schedule(&mut frame);
 
-        assert_eq!(sched::TCBS[1].ticks_used, 0,
+        assert_eq!((*sched::TCBS.get_mut())[1].ticks_used, 0,
             "ticks_used should be 0 after restart");
     }
 }
@@ -2119,10 +2119,10 @@ fn sched_ticks_used_reset_on_restart() {
 fn sched_heartbeat_reset_on_restart() {
     unsafe {
         reset_test_state();
-        sched::TCBS[1].heartbeat_interval = 50;
-        sched::TCBS[1].last_heartbeat = 10;
-        sched::TCBS[1].state = TaskState::Faulted;
-        sched::TCBS[1].fault_tick = 0;
+        (*sched::TCBS.get_mut())[1].heartbeat_interval = 50;
+        (*sched::TCBS.get_mut())[1].last_heartbeat = 10;
+        (*sched::TCBS.get_mut())[1].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[1].fault_tick = 0;
 
         *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
         let mut frame = TrapFrame {
@@ -2130,7 +2130,7 @@ fn sched_heartbeat_reset_on_restart() {
         };
         sched::schedule(&mut frame);
 
-        assert_eq!(sched::TCBS[1].last_heartbeat, RESTART_DELAY_TICKS,
+        assert_eq!((*sched::TCBS.get_mut())[1].last_heartbeat, RESTART_DELAY_TICKS,
             "last_heartbeat should be reset to current tick on restart");
     }
 }
@@ -2593,9 +2593,9 @@ fn l6_cfg_separation_works() {
     unsafe { reset_test_state(); }
 
     // Scheduler: create/schedule tasks on host (no TTBR0, no eret)
-    let mut frame = unsafe { core::ptr::read(&sched::TCBS[0].context) };
+    let mut frame = unsafe { core::ptr::read(&(*sched::TCBS.get_mut())[0].context) };
     frame.x[0] = 42;
-    unsafe { sched::TCBS[1].state = TaskState::Ready; }
+    unsafe { (*sched::TCBS.get_mut())[1].state = TaskState::Ready; }
     sched::schedule(&mut frame);
     // Schedule picked a Ready task — proves portable logic works
     assert_ne!(unsafe { read_current() }, 0);
@@ -2603,19 +2603,19 @@ fn l6_cfg_separation_works() {
     // IPC: send/recv state machine on host (no SVC, no asm)
     unsafe {
         reset_test_state();
-        sched::TCBS[0].caps = cap::CAP_IPC_SEND_EP0;
-        sched::TCBS[1].caps = cap::CAP_IPC_RECV_EP0;
+        (*sched::TCBS.get_mut())[0].caps = cap::CAP_IPC_SEND_EP0;
+        (*sched::TCBS.get_mut())[1].caps = cap::CAP_IPC_RECV_EP0;
     }
-    let mut f0 = unsafe { core::ptr::read(&sched::TCBS[0].context) };
+    let mut f0 = unsafe { core::ptr::read(&(*sched::TCBS.get_mut())[0].context) };
     f0.x[0] = 0xBEEF;
     ipc::sys_send(&mut f0, 0);
     // Task 0 blocked on send — proves IPC works on host
-    assert_eq!(unsafe { sched::TCBS[0].state }, TaskState::Blocked);
+    assert_eq!(unsafe { (*sched::TCBS.get_mut())[0].state }, TaskState::Blocked);
 
     // Grant: create/revoke on host (mmu stub)
     unsafe {
         reset_test_state();
-        sched::TCBS[0].caps = cap::CAP_GRANT_CREATE | cap::CAP_GRANT_REVOKE;
+        (*sched::TCBS.get_mut())[0].caps = cap::CAP_GRANT_CREATE | cap::CAP_GRANT_REVOKE;
     }
     let result = grant::grant_create(0, 0, 1);
     assert_eq!(result, 0); // 0 = success
@@ -2626,7 +2626,7 @@ fn l6_cfg_separation_works() {
     // IRQ: bind/cleanup on host (gic stub)
     unsafe {
         reset_test_state();
-        sched::TCBS[0].caps = cap::CAP_IRQ_BIND | cap::CAP_IRQ_ACK;
+        (*sched::TCBS.get_mut())[0].caps = cap::CAP_IRQ_BIND | cap::CAP_IRQ_ACK;
     }
     let bind_result = irq::irq_bind(33, 0, 1); // INTID=33 (SPI), task=0, bit=1
     assert_eq!(bind_result, 0);
@@ -2680,27 +2680,27 @@ fn ipc_sys_send_immediate_delivery() {
     unsafe {
         reset_test_state();
         // Task 1 is waiting to receive on EP0
-        ipc::ENDPOINTS[0].receiver = Some(1);
-        sched::TCBS[1].state = TaskState::Blocked;
+        (*ipc::ENDPOINTS.get_mut())[0].receiver = Some(1);
+        (*sched::TCBS.get_mut())[1].state = TaskState::Blocked;
         // Set task 0 as current (sender), put message in its context
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[0].context.x[0] = 0xAAAA;
-        sched::TCBS[0].context.x[1] = 0xBBBB;
-        sched::TCBS[0].context.x[2] = 0xCCCC;
-        sched::TCBS[0].context.x[3] = 0xDDDD;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0xAAAA;
+        (*sched::TCBS.get_mut())[0].context.x[1] = 0xBBBB;
+        (*sched::TCBS.get_mut())[0].context.x[2] = 0xCCCC;
+        (*sched::TCBS.get_mut())[0].context.x[3] = 0xDDDD;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_send(&mut frame, 0);
 
         // Receiver should have the message and be Ready
-        assert_eq!(sched::TCBS[1].context.x[0], 0xAAAA);
-        assert_eq!(sched::TCBS[1].context.x[1], 0xBBBB);
-        assert_eq!(sched::TCBS[1].context.x[2], 0xCCCC);
-        assert_eq!(sched::TCBS[1].context.x[3], 0xDDDD);
-        assert_eq!(sched::TCBS[1].state, TaskState::Ready);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[0], 0xAAAA);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[1], 0xBBBB);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[2], 0xCCCC);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[3], 0xDDDD);
+        assert_eq!((*sched::TCBS.get_mut())[1].state, TaskState::Ready);
         // Receiver slot should be cleared
-        assert!(ipc::ENDPOINTS[0].receiver.is_none());
+        assert!((*ipc::ENDPOINTS.get_mut())[0].receiver.is_none());
     }
 }
 
@@ -2710,15 +2710,15 @@ fn ipc_sys_send_blocks_when_no_receiver() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[0].context.x[0] = 0x1234;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0x1234;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_send(&mut frame, 0);
 
         // Sender should be blocked and in the queue
-        assert_eq!(sched::TCBS[0].state, TaskState::Blocked);
-        assert!(ipc::ENDPOINTS[0].sender_queue.contains(0));
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Blocked);
+        assert!((*ipc::ENDPOINTS.get_mut())[0].sender_queue.contains(0));
     }
 }
 
@@ -2728,13 +2728,13 @@ fn ipc_sys_send_invalid_endpoint() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_send(&mut frame, 99); // invalid
 
         // Should still be Running, no panic
-        assert_eq!(sched::TCBS[0].state, TaskState::Running);
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Running);
     }
 }
 
@@ -2745,19 +2745,19 @@ fn ipc_sys_send_queue_full() {
         reset_test_state();
         // Fill sender queue with fake tasks
         for i in 0..ipc::MAX_WAITERS {
-            ipc::ENDPOINTS[0].sender_queue.push(i);
+            (*ipc::ENDPOINTS.get_mut())[0].sender_queue.push(i);
         }
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_send(&mut frame, 0);
 
         // Should return without blocking (queue was full)
         // State may be Running or Ready depending on schedule path
         // The key is it didn't deadlock
-        assert!(sched::TCBS[0].state == TaskState::Running
-            || sched::TCBS[0].state == TaskState::Ready);
+        assert!((*sched::TCBS.get_mut())[0].state == TaskState::Running
+            || (*sched::TCBS.get_mut())[0].state == TaskState::Ready);
     }
 }
 
@@ -2767,24 +2767,24 @@ fn ipc_sys_recv_immediate_delivery() {
     unsafe {
         reset_test_state();
         // Task 0 is a sender queued on EP0 with a message
-        sched::TCBS[0].state = TaskState::Blocked;
-        sched::TCBS[0].context.x[0] = 0xFEED;
-        sched::TCBS[0].context.x[1] = 0xBEEF;
-        ipc::ENDPOINTS[0].sender_queue.push(0);
+        (*sched::TCBS.get_mut())[0].state = TaskState::Blocked;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0xFEED;
+        (*sched::TCBS.get_mut())[0].context.x[1] = 0xBEEF;
+        (*ipc::ENDPOINTS.get_mut())[0].sender_queue.push(0);
 
         // Task 1 calls recv
         *sched::CURRENT.get_mut() = 1;
-        sched::TCBS[1].state = TaskState::Running;
-        let mut frame = core::ptr::read(&sched::TCBS[1].context);
+        (*sched::TCBS.get_mut())[1].state = TaskState::Running;
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[1].context);
         ipc::sys_recv(&mut frame, 0);
 
         // Sender should be unblocked
-        assert_eq!(sched::TCBS[0].state, TaskState::Ready);
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Ready);
         // Receiver should have the message (loaded into frame and TCB)
-        assert_eq!(sched::TCBS[1].context.x[0], 0xFEED);
-        assert_eq!(sched::TCBS[1].context.x[1], 0xBEEF);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[0], 0xFEED);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[1], 0xBEEF);
         // Queue should be empty
-        assert_eq!(ipc::ENDPOINTS[0].sender_queue.count, 0);
+        assert_eq!((*ipc::ENDPOINTS.get_mut())[0].sender_queue.count, 0);
     }
 }
 
@@ -2794,14 +2794,14 @@ fn ipc_sys_recv_blocks_when_no_sender() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 1;
-        sched::TCBS[1].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[1].state = TaskState::Running;
 
-        let mut frame = core::ptr::read(&sched::TCBS[1].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[1].context);
         ipc::sys_recv(&mut frame, 0);
 
         // Receiver should be blocked and registered
-        assert_eq!(sched::TCBS[1].state, TaskState::Blocked);
-        assert_eq!(ipc::ENDPOINTS[0].receiver, Some(1));
+        assert_eq!((*sched::TCBS.get_mut())[1].state, TaskState::Blocked);
+        assert_eq!((*ipc::ENDPOINTS.get_mut())[0].receiver, Some(1));
     }
 }
 
@@ -2811,12 +2811,12 @@ fn ipc_sys_recv_invalid_endpoint() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_recv(&mut frame, 99);
 
-        assert_eq!(sched::TCBS[0].state, TaskState::Running);
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Running);
     }
 }
 
@@ -2826,26 +2826,26 @@ fn ipc_sys_call_with_receiver_waiting() {
     unsafe {
         reset_test_state();
         // Task 1 is waiting to receive on EP0
-        ipc::ENDPOINTS[0].receiver = Some(1);
-        sched::TCBS[1].state = TaskState::Blocked;
+        (*ipc::ENDPOINTS.get_mut())[0].receiver = Some(1);
+        (*sched::TCBS.get_mut())[1].state = TaskState::Blocked;
 
         // Task 0 calls sys_call (send + recv)
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[0].context.x[0] = 0xCAFE;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0xCAFE;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_call(&mut frame, 0);
 
         // Message delivered to task 1
-        assert_eq!(sched::TCBS[1].context.x[0], 0xCAFE);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[0], 0xCAFE);
         // Task 1 is Ready or Running (schedule may have picked it)
-        assert!(sched::TCBS[1].state == TaskState::Ready
-            || sched::TCBS[1].state == TaskState::Running);
+        assert!((*sched::TCBS.get_mut())[1].state == TaskState::Ready
+            || (*sched::TCBS.get_mut())[1].state == TaskState::Running);
 
         // Caller (task 0) should now be receiver, blocked
-        assert_eq!(sched::TCBS[0].state, TaskState::Blocked);
-        assert_eq!(ipc::ENDPOINTS[0].receiver, Some(0));
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Blocked);
+        assert_eq!((*ipc::ENDPOINTS.get_mut())[0].receiver, Some(0));
     }
 }
 
@@ -2855,15 +2855,15 @@ fn ipc_sys_call_no_receiver() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[0].context.x[0] = 0x9999;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0x9999;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_call(&mut frame, 0);
 
         // Should be blocked, enqueued as sender
-        assert_eq!(sched::TCBS[0].state, TaskState::Blocked);
-        assert!(ipc::ENDPOINTS[0].sender_queue.contains(0));
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Blocked);
+        assert!((*ipc::ENDPOINTS.get_mut())[0].sender_queue.contains(0));
     }
 }
 
@@ -2872,12 +2872,12 @@ fn ipc_sys_call_invalid_endpoint() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_call(&mut frame, 99);
 
-        assert_eq!(sched::TCBS[0].state, TaskState::Running);
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Running);
     }
 }
 
@@ -2887,17 +2887,17 @@ fn ipc_sys_call_queue_full() {
     unsafe {
         reset_test_state();
         for i in 0..ipc::MAX_WAITERS {
-            ipc::ENDPOINTS[0].sender_queue.push(i);
+            (*ipc::ENDPOINTS.get_mut())[0].sender_queue.push(i);
         }
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_call(&mut frame, 0);
 
         // Should not deadlock — early return
-        assert!(sched::TCBS[0].state == TaskState::Running
-            || sched::TCBS[0].state == TaskState::Ready);
+        assert!((*sched::TCBS.get_mut())[0].state == TaskState::Running
+            || (*sched::TCBS.get_mut())[0].state == TaskState::Ready);
     }
 }
 
@@ -2907,27 +2907,27 @@ fn ipc_sys_call_priority_boost() {
     unsafe {
         reset_test_state();
         // Task 0 = high priority (7), task 1 = low priority (2)
-        sched::TCBS[0].priority = 7;
-        sched::TCBS[0].base_priority = 7;
-        sched::TCBS[1].priority = 2;
-        sched::TCBS[1].base_priority = 2;
+        (*sched::TCBS.get_mut())[0].priority = 7;
+        (*sched::TCBS.get_mut())[0].base_priority = 7;
+        (*sched::TCBS.get_mut())[1].priority = 2;
+        (*sched::TCBS.get_mut())[1].base_priority = 2;
 
         // Task 1 is waiting to receive
-        ipc::ENDPOINTS[0].receiver = Some(1);
-        sched::TCBS[1].state = TaskState::Blocked;
+        (*ipc::ENDPOINTS.get_mut())[0].receiver = Some(1);
+        (*sched::TCBS.get_mut())[1].state = TaskState::Blocked;
 
         // Task 0 calls (sends + waits for reply)
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[0].context.x[0] = 0x42;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0x42;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_call(&mut frame, 0);
 
         // Task 1 should have been boosted to priority 7
-        assert_eq!(sched::TCBS[1].priority, 7);
+        assert_eq!((*sched::TCBS.get_mut())[1].priority, 7);
         // Task 1's base priority unchanged
-        assert_eq!(sched::TCBS[1].base_priority, 2);
+        assert_eq!((*sched::TCBS.get_mut())[1].base_priority, 2);
     }
 }
 
@@ -2937,20 +2937,20 @@ fn ipc_send_restores_receiver_priority() {
     unsafe {
         reset_test_state();
         // Receiver was boosted from previous call
-        sched::TCBS[1].priority = 7;
-        sched::TCBS[1].base_priority = 2;
-        ipc::ENDPOINTS[0].receiver = Some(1);
-        sched::TCBS[1].state = TaskState::Blocked;
+        (*sched::TCBS.get_mut())[1].priority = 7;
+        (*sched::TCBS.get_mut())[1].base_priority = 2;
+        (*ipc::ENDPOINTS.get_mut())[0].receiver = Some(1);
+        (*sched::TCBS.get_mut())[1].state = TaskState::Blocked;
 
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[0].context.x[0] = 0x55;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0x55;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_send(&mut frame, 0);
 
         // sys_send calls restore_base_priority on receiver
-        assert_eq!(sched::TCBS[1].priority, 2);
+        assert_eq!((*sched::TCBS.get_mut())[1].priority, 2);
     }
 }
 
@@ -2962,25 +2962,25 @@ fn sched_fault_current_task_basic() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[0].priority = 5;
-        sched::TCBS[0].base_priority = 3;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].priority = 5;
+        (*sched::TCBS.get_mut())[0].base_priority = 3;
         *aegis_os::timer::TICK_COUNT.get_mut() = 42;
 
         // Task 0 is receiver on EP0
-        ipc::ENDPOINTS[0].receiver = Some(0);
+        (*ipc::ENDPOINTS.get_mut())[0].receiver = Some(0);
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         sched::fault_current_task(&mut frame);
 
         // Task should be Faulted
-        assert_eq!(sched::TCBS[0].state, TaskState::Faulted);
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Faulted);
         // Fault tick recorded
-        assert_eq!(sched::TCBS[0].fault_tick, 42);
+        assert_eq!((*sched::TCBS.get_mut())[0].fault_tick, 42);
         // Priority restored to base
-        assert_eq!(sched::TCBS[0].priority, 3);
+        assert_eq!((*sched::TCBS.get_mut())[0].priority, 3);
         // IPC cleanup: receiver slot cleared
-        assert!(ipc::ENDPOINTS[0].receiver.is_none());
+        assert!((*ipc::ENDPOINTS.get_mut())[0].receiver.is_none());
         // Should have scheduled away (CURRENT changed)
         assert_ne!(read_current(), 0);
     }
@@ -2992,13 +2992,13 @@ fn sched_fault_current_task_cleans_irq() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
 
         // Bind an IRQ (INTID 33) to task 0
         let r = irq::irq_bind(33, 0, 1);
         assert_eq!(r, 0); // sanity: bind succeeds
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         sched::fault_current_task(&mut frame);
 
         // IRQ binding should be cleaned up
@@ -3013,14 +3013,14 @@ fn sched_restart_task_non_faulted_noop() {
     // restart_task on a Ready task → no-op (early return)
     unsafe {
         reset_test_state();
-        sched::TCBS[0].state = TaskState::Ready;
-        sched::TCBS[0].context.x[5] = 0xDEAD;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Ready;
+        (*sched::TCBS.get_mut())[0].context.x[5] = 0xDEAD;
 
         sched::restart_task(0);
 
         // Should not have changed — it was Ready, not Faulted
-        assert_eq!(sched::TCBS[0].state, TaskState::Ready);
-        assert_eq!(sched::TCBS[0].context.x[5], 0xDEAD);
+        assert_eq!((*sched::TCBS.get_mut())[0].state, TaskState::Ready);
+        assert_eq!((*sched::TCBS.get_mut())[0].context.x[5], 0xDEAD);
     }
 }
 
@@ -3030,22 +3030,22 @@ fn sched_schedule_no_ready_task_forces_idle() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
         // Block all non-running, non-idle tasks
         for i in 1..NUM_TASKS {
-            sched::TCBS[i].state = TaskState::Blocked;
+            (*sched::TCBS.get_mut())[i].state = TaskState::Blocked;
         }
 
         // Set budgets: task 0 has exhausted budget
-        sched::TCBS[0].time_budget = 10;
-        sched::TCBS[0].ticks_used = 10;
+        (*sched::TCBS.get_mut())[0].time_budget = 10;
+        (*sched::TCBS.get_mut())[0].ticks_used = 10;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         sched::schedule(&mut frame);
 
         // Should fallback to idle, forced Ready → Running
         assert_eq!(read_current(), IDLE_TASK_ID);
-        assert_eq!(sched::TCBS[IDLE_TASK_ID].state, TaskState::Running);
+        assert_eq!((*sched::TCBS.get_mut())[IDLE_TASK_ID].state, TaskState::Running);
     }
 }
 
@@ -3055,22 +3055,22 @@ fn sched_schedule_idle_faulted_gets_restarted() {
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[0].time_budget = 10;
-        sched::TCBS[0].ticks_used = 10;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].time_budget = 10;
+        (*sched::TCBS.get_mut())[0].ticks_used = 10;
         // Block all non-running, non-idle tasks
         for i in 1..IDLE_TASK_ID {
-            sched::TCBS[i].state = TaskState::Blocked;
+            (*sched::TCBS.get_mut())[i].state = TaskState::Blocked;
         }
-        sched::TCBS[IDLE_TASK_ID].state = TaskState::Faulted;
-        sched::TCBS[IDLE_TASK_ID].fault_tick = 0;
+        (*sched::TCBS.get_mut())[IDLE_TASK_ID].state = TaskState::Faulted;
+        (*sched::TCBS.get_mut())[IDLE_TASK_ID].fault_tick = 0;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         sched::schedule(&mut frame);
 
         // Idle should be forced Ready → Running
         assert_eq!(read_current(), IDLE_TASK_ID);
-        assert_eq!(sched::TCBS[IDLE_TASK_ID].state, TaskState::Running);
+        assert_eq!((*sched::TCBS.get_mut())[IDLE_TASK_ID].state, TaskState::Running);
     }
 }
 
@@ -3090,10 +3090,10 @@ fn sched_set_task_priority_out_of_range() {
     // Should be no-op
     unsafe {
         reset_test_state();
-        let old_prio = sched::TCBS[0].priority;
+        let old_prio = (*sched::TCBS.get_mut())[0].priority;
         sched::set_task_priority(99, 7);
         // No crash, task 0 unchanged
-        assert_eq!(sched::TCBS[0].priority, old_prio);
+        assert_eq!((*sched::TCBS.get_mut())[0].priority, old_prio);
     }
 }
 
@@ -3174,9 +3174,9 @@ fn grant_cleanup_clears_both_roles() {
         grant::cleanup_task(0);
 
         // Grant 0 should be deactivated (task 0 was owner)
-        assert!(!grant::GRANTS[0].active);
+        assert!(!(*grant::GRANTS.get_mut())[0].active);
         // Grant 1 should be deactivated (task 0 was peer)
-        assert!(!grant::GRANTS[1].active);
+        assert!(!(*grant::GRANTS.get_mut())[1].active);
     }
 }
 
@@ -3201,24 +3201,24 @@ fn ipc_round_trip_message_integrity() {
     unsafe {
         reset_test_state();
         // Task 1 is waiting on EP0
-        ipc::ENDPOINTS[0].receiver = Some(1);
-        sched::TCBS[1].state = TaskState::Blocked;
+        (*ipc::ENDPOINTS.get_mut())[0].receiver = Some(1);
+        (*sched::TCBS.get_mut())[1].state = TaskState::Blocked;
 
         // Task 0 sends specific message
         *sched::CURRENT.get_mut() = 0;
-        sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[0].context.x[0] = 0x1111_1111_AAAA_BBBB;
-        sched::TCBS[0].context.x[1] = 0x2222_2222_CCCC_DDDD;
-        sched::TCBS[0].context.x[2] = 0x3333_3333_EEEE_FFFF;
-        sched::TCBS[0].context.x[3] = 0x4444_4444_0000_1111;
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0x1111_1111_AAAA_BBBB;
+        (*sched::TCBS.get_mut())[0].context.x[1] = 0x2222_2222_CCCC_DDDD;
+        (*sched::TCBS.get_mut())[0].context.x[2] = 0x3333_3333_EEEE_FFFF;
+        (*sched::TCBS.get_mut())[0].context.x[3] = 0x4444_4444_0000_1111;
 
-        let mut frame = core::ptr::read(&sched::TCBS[0].context);
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[0].context);
         ipc::sys_send(&mut frame, 0);
 
-        assert_eq!(sched::TCBS[1].context.x[0], 0x1111_1111_AAAA_BBBB);
-        assert_eq!(sched::TCBS[1].context.x[1], 0x2222_2222_CCCC_DDDD);
-        assert_eq!(sched::TCBS[1].context.x[2], 0x3333_3333_EEEE_FFFF);
-        assert_eq!(sched::TCBS[1].context.x[3], 0x4444_4444_0000_1111);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[0], 0x1111_1111_AAAA_BBBB);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[1], 0x2222_2222_CCCC_DDDD);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[2], 0x3333_3333_EEEE_FFFF);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[3], 0x4444_4444_0000_1111);
     }
 }
 
@@ -3227,19 +3227,19 @@ fn ipc_recv_loads_frame_on_immediate() {
     // When recv finds a waiting sender, it loads message into the frame
     unsafe {
         reset_test_state();
-        sched::TCBS[0].state = TaskState::Blocked;
-        sched::TCBS[0].context.x[0] = 0xABCD;
-        sched::TCBS[0].context.x[1] = 0xEF01;
-        ipc::ENDPOINTS[0].sender_queue.push(0);
+        (*sched::TCBS.get_mut())[0].state = TaskState::Blocked;
+        (*sched::TCBS.get_mut())[0].context.x[0] = 0xABCD;
+        (*sched::TCBS.get_mut())[0].context.x[1] = 0xEF01;
+        (*ipc::ENDPOINTS.get_mut())[0].sender_queue.push(0);
 
         *sched::CURRENT.get_mut() = 1;
-        sched::TCBS[1].state = TaskState::Running;
-        let mut frame = core::ptr::read(&sched::TCBS[1].context);
+        (*sched::TCBS.get_mut())[1].state = TaskState::Running;
+        let mut frame = core::ptr::read(&(*sched::TCBS.get_mut())[1].context);
         ipc::sys_recv(&mut frame, 0);
 
         // Frame should be updated (load_frame loads from TCB into frame)
         // The TCB should have the message
-        assert_eq!(sched::TCBS[1].context.x[0], 0xABCD);
-        assert_eq!(sched::TCBS[1].context.x[1], 0xEF01);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[0], 0xABCD);
+        assert_eq!((*sched::TCBS.get_mut())[1].context.x[1], 0xEF01);
     }
 }

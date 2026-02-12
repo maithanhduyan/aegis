@@ -91,7 +91,7 @@ pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         let current = *crate::sched::CURRENT.get();
-        crate::sched::TCBS[current].ticks_used += 1;
+        (*crate::sched::TCBS.get_mut())[current].ticks_used += 1;
 
         // Phase K: Epoch management — reset budgets every EPOCH_LENGTH ticks
         *crate::sched::EPOCH_TICKS.get_mut() += 1;

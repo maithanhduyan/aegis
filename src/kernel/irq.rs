@@ -14,6 +14,7 @@
 ///   SYS_IRQ_BIND = 9:  register to receive IRQ as notification
 ///   SYS_IRQ_ACK  = 10: acknowledge IRQ handled, re-enable INTID
 
+use crate::kernel::cell::KernelCell;
 use crate::sched;
 use crate::uart_print;
 
@@ -60,8 +61,8 @@ pub const EMPTY_BINDING: IrqBinding = IrqBinding {
 
 // ─── Static binding table ──────────────────────────────────────────
 
-pub static mut IRQ_BINDINGS: [IrqBinding; MAX_IRQ_BINDINGS] =
-    [EMPTY_BINDING; MAX_IRQ_BINDINGS];
+pub static IRQ_BINDINGS: KernelCell<[IrqBinding; MAX_IRQ_BINDINGS]> =
+    KernelCell::new([EMPTY_BINDING; MAX_IRQ_BINDINGS]);
 
 // ─── Core operations ───────────────────────────────────────────────
 
@@ -90,7 +91,7 @@ pub fn irq_bind(intid: u32, task_id: usize, notify_bit: u64) -> u64 {
     unsafe {
         // Check for duplicate: same INTID already bound
         for i in 0..MAX_IRQ_BINDINGS {
-            if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].intid == intid {
+            if (*IRQ_BINDINGS.get_mut())[i].active && (*IRQ_BINDINGS.get_mut())[i].intid == intid {
                 uart_print("!!! IRQ: INTID already bound\n");
                 return ERR_ALREADY_BOUND;
             }
@@ -99,7 +100,7 @@ pub fn irq_bind(intid: u32, task_id: usize, notify_bit: u64) -> u64 {
         // Find empty slot
         let mut slot: Option<usize> = None;
         for i in 0..MAX_IRQ_BINDINGS {
-            if !IRQ_BINDINGS[i].active {
+            if !(*IRQ_BINDINGS.get_mut())[i].active {
                 slot = Some(i);
                 break;
             }
@@ -113,7 +114,7 @@ pub fn irq_bind(intid: u32, task_id: usize, notify_bit: u64) -> u64 {
             }
         };
 
-        IRQ_BINDINGS[idx] = IrqBinding {
+        (*IRQ_BINDINGS.get_mut())[idx] = IrqBinding {
             intid,
             task_id,
             notify_bit,
@@ -147,20 +148,20 @@ pub fn irq_ack(intid: u32, task_id: usize) -> u64 {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_IRQ_BINDINGS {
-            if IRQ_BINDINGS[i].active
-                && IRQ_BINDINGS[i].intid == intid
+            if (*IRQ_BINDINGS.get_mut())[i].active
+                && (*IRQ_BINDINGS.get_mut())[i].intid == intid
             {
-                if IRQ_BINDINGS[i].task_id != task_id {
+                if (*IRQ_BINDINGS.get_mut())[i].task_id != task_id {
                     uart_print("!!! IRQ ACK: not the bound task\n");
                     return ERR_NOT_OWNER;
                 }
 
-                if !IRQ_BINDINGS[i].pending_ack {
+                if !(*IRQ_BINDINGS.get_mut())[i].pending_ack {
                     // Already ACK'd or never fired — no-op
                     return 0;
                 }
 
-                IRQ_BINDINGS[i].pending_ack = false;
+                (*IRQ_BINDINGS.get_mut())[i].pending_ack = false;
 
                 // Re-enable (unmask) the INTID in GIC
                 #[cfg(target_arch = "aarch64")]
@@ -191,25 +192,25 @@ pub fn irq_route(intid: u32, _frame: &mut crate::exception::TrapFrame) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_IRQ_BINDINGS {
-            if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].intid == intid {
-                let tid = IRQ_BINDINGS[i].task_id;
-                let bit = IRQ_BINDINGS[i].notify_bit;
+            if (*IRQ_BINDINGS.get_mut())[i].active && (*IRQ_BINDINGS.get_mut())[i].intid == intid {
+                let tid = (*IRQ_BINDINGS.get_mut())[i].task_id;
+                let bit = (*IRQ_BINDINGS.get_mut())[i].notify_bit;
 
                 // OR notification bit into task's pending mask
-                sched::TCBS[tid].notify_pending |= bit;
+                (*sched::TCBS.get_mut())[tid].notify_pending |= bit;
 
                 // If task is waiting for notifications, unblock it
-                if sched::TCBS[tid].notify_waiting {
-                    sched::TCBS[tid].notify_waiting = false;
-                    sched::TCBS[tid].state = sched::TaskState::Ready;
+                if (*sched::TCBS.get_mut())[tid].notify_waiting {
+                    (*sched::TCBS.get_mut())[tid].notify_waiting = false;
+                    (*sched::TCBS.get_mut())[tid].state = sched::TaskState::Ready;
                     // Deliver pending bits into x0
-                    let pending = sched::TCBS[tid].notify_pending;
-                    sched::TCBS[tid].context.x[0] = pending;
-                    sched::TCBS[tid].notify_pending = 0;
+                    let pending = (*sched::TCBS.get_mut())[tid].notify_pending;
+                    (*sched::TCBS.get_mut())[tid].context.x[0] = pending;
+                    (*sched::TCBS.get_mut())[tid].notify_pending = 0;
                 }
 
                 // Mark pending ACK — INTID stays masked until task ACKs
-                IRQ_BINDINGS[i].pending_ack = true;
+                (*IRQ_BINDINGS.get_mut())[i].pending_ack = true;
 
                 // Mask this INTID until ACK
                 crate::gic::disable_intid(intid);
@@ -231,21 +232,21 @@ pub fn irq_route_test(intid: u32, task_id: usize) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_IRQ_BINDINGS {
-            if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].intid == intid {
-                let tid = IRQ_BINDINGS[i].task_id;
-                let bit = IRQ_BINDINGS[i].notify_bit;
+            if (*IRQ_BINDINGS.get_mut())[i].active && (*IRQ_BINDINGS.get_mut())[i].intid == intid {
+                let tid = (*IRQ_BINDINGS.get_mut())[i].task_id;
+                let bit = (*IRQ_BINDINGS.get_mut())[i].notify_bit;
 
-                sched::TCBS[tid].notify_pending |= bit;
+                (*sched::TCBS.get_mut())[tid].notify_pending |= bit;
 
-                if sched::TCBS[tid].notify_waiting {
-                    sched::TCBS[tid].notify_waiting = false;
-                    sched::TCBS[tid].state = sched::TaskState::Ready;
-                    let pending = sched::TCBS[tid].notify_pending;
-                    sched::TCBS[tid].context.x[0] = pending;
-                    sched::TCBS[tid].notify_pending = 0;
+                if (*sched::TCBS.get_mut())[tid].notify_waiting {
+                    (*sched::TCBS.get_mut())[tid].notify_waiting = false;
+                    (*sched::TCBS.get_mut())[tid].state = sched::TaskState::Ready;
+                    let pending = (*sched::TCBS.get_mut())[tid].notify_pending;
+                    (*sched::TCBS.get_mut())[tid].context.x[0] = pending;
+                    (*sched::TCBS.get_mut())[tid].notify_pending = 0;
                 }
 
-                IRQ_BINDINGS[i].pending_ack = true;
+                (*IRQ_BINDINGS.get_mut())[i].pending_ack = true;
                 // No GIC on host
                 return;
             }
@@ -261,17 +262,17 @@ pub fn irq_cleanup_task(task_id: usize) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..MAX_IRQ_BINDINGS {
-            if IRQ_BINDINGS[i].active && IRQ_BINDINGS[i].task_id == task_id {
+            if (*IRQ_BINDINGS.get_mut())[i].active && (*IRQ_BINDINGS.get_mut())[i].task_id == task_id {
                 // If IRQ was masked waiting for ACK, unmask it
-                if IRQ_BINDINGS[i].pending_ack {
+                if (*IRQ_BINDINGS.get_mut())[i].pending_ack {
                     #[cfg(target_arch = "aarch64")]
                     {
-                        crate::gic::enable_intid(IRQ_BINDINGS[i].intid);
+                        crate::gic::enable_intid((*IRQ_BINDINGS.get_mut())[i].intid);
                     }
                 }
 
                 uart_print("[AegisOS] IRQ cleanup: unbind INTID ");
-                crate::uart_print_hex(IRQ_BINDINGS[i].intid as u64);
+                crate::uart_print_hex((*IRQ_BINDINGS.get_mut())[i].intid as u64);
                 uart_print(" from task ");
                 crate::uart_print_hex(task_id as u64);
                 uart_print("\n");
@@ -279,10 +280,10 @@ pub fn irq_cleanup_task(task_id: usize) {
                 // Disable the INTID since no one is listening
                 #[cfg(target_arch = "aarch64")]
                 {
-                    crate::gic::disable_intid(IRQ_BINDINGS[i].intid);
+                    crate::gic::disable_intid((*IRQ_BINDINGS.get_mut())[i].intid);
                 }
 
-                IRQ_BINDINGS[i] = EMPTY_BINDING;
+                (*IRQ_BINDINGS.get_mut())[i] = EMPTY_BINDING;
             }
         }
     }

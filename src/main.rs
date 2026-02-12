@@ -468,14 +468,14 @@ pub extern "C" fn kernel_main() -> ! {
         // SAFETY: Single-core kernel, called during boot before interrupts enabled.
         unsafe {
             for i in 0..sched::NUM_TASKS {
-                sched::TCBS[i].caps = TASK_META[i].caps;
-                sched::TCBS[i].priority = TASK_META[i].priority;
-                sched::TCBS[i].base_priority = TASK_META[i].priority;
-                sched::TCBS[i].time_budget = TASK_META[i].time_budget;
-                sched::TCBS[i].heartbeat_interval = TASK_META[i].heartbeat_interval;
+                (*sched::TCBS.get_mut())[i].caps = TASK_META[i].caps;
+                (*sched::TCBS.get_mut())[i].priority = TASK_META[i].priority;
+                (*sched::TCBS.get_mut())[i].base_priority = TASK_META[i].priority;
+                (*sched::TCBS.get_mut())[i].time_budget = TASK_META[i].time_budget;
+                (*sched::TCBS.get_mut())[i].heartbeat_interval = TASK_META[i].heartbeat_interval;
                 // ASID = task_id + 1 (ASID 0 is reserved for kernel boot)
                 // All tasks get page tables (even inactive — no harm, enables future activation)
-                sched::TCBS[i].ttbr0 = mmu::ttbr0_for_task(i, (i + 1) as u16);
+                (*sched::TCBS.get_mut())[i].ttbr0 = mmu::ttbr0_for_task(i, (i + 1) as u16);
             }
         }
     }
@@ -568,8 +568,8 @@ pub extern "C" fn kernel_main() -> ! {
                 // Override idle task with ELF-loaded entry point
                 // SAFETY: Single-core kernel, called during boot. Idle task not yet running.
                 unsafe {
-                    sched::TCBS[sched::IDLE_TASK_ID].entry_point = entry;
-                    sched::TCBS[sched::IDLE_TASK_ID].context.elr_el1 = entry;
+                    (*sched::TCBS.get_mut())[sched::IDLE_TASK_ID].entry_point = entry;
+                    (*sched::TCBS.get_mut())[sched::IDLE_TASK_ID].context.elr_el1 = entry;
                 }
                 uart_print("[AegisOS] task ");
                 aegis_os::uart_print_dec(sched::IDLE_TASK_ID as u64);

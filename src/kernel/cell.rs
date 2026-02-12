@@ -76,3 +76,27 @@ impl<T> KernelCell<T> {
         self.0.get()
     }
 }
+
+// ─── kcell_index! macro ────────────────────────────────────────────
+
+/// Convenience macro for indexed access into `KernelCell<[T; N]>`.
+///
+/// Expands to `&mut (*$cell.get_mut())[$idx]`, reducing boilerplate
+/// when accessing elements of a KernelCell-wrapped array.
+///
+/// # Safety
+///
+/// Must be called inside an `unsafe` block — same invariants as
+/// `KernelCell::get_mut()`: single-core, no concurrent access.
+///
+/// # Example
+///
+/// ```ignore
+/// unsafe { kcell_index!(TCBS, i).state = TaskState::Ready; }
+/// ```
+#[macro_export]
+macro_rules! kcell_index {
+    ($cell:expr, $idx:expr) => {
+        &mut (*$cell.get_mut())[$idx]
+    };
+}

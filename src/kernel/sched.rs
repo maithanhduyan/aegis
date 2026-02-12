@@ -63,7 +63,7 @@ pub const IDLE_TASK_ID: usize = NUM_TASKS - 1;
 
 use crate::kernel::cell::KernelCell;
 
-pub static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
+pub static TCBS: KernelCell<[Tcb; NUM_TASKS]> = KernelCell::new([EMPTY_TCB; NUM_TASKS]);
 
 /// Index of currently running task.
 /// Encapsulated in KernelCell (Phase M1) — access via unsafe get()/get_mut().
@@ -142,16 +142,16 @@ pub fn init(entries: &[u64; NUM_TASKS]) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..NUM_TASKS {
-            TCBS[i].id = i as u16;
-            TCBS[i].stack_top = kstacks_base + (i as u64 + 1) * 4096;
-            TCBS[i].user_stack_top = ustacks_base + (i as u64 + 1) * 4096;
+            (*TCBS.get_mut())[i].id = i as u16;
+            (*TCBS.get_mut())[i].stack_top = kstacks_base + (i as u64 + 1) * 4096;
+            (*TCBS.get_mut())[i].user_stack_top = ustacks_base + (i as u64 + 1) * 4096;
             if entries[i] != 0 {
                 // Active task: set entry point and mark Ready
-                TCBS[i].state = TaskState::Ready;
-                TCBS[i].entry_point = entries[i];
-                TCBS[i].context.elr_el1 = entries[i];
-                TCBS[i].context.spsr_el1 = 0x000; // EL0t
-                TCBS[i].context.sp_el0 = ustacks_base + (i as u64 + 1) * 4096;
+                (*TCBS.get_mut())[i].state = TaskState::Ready;
+                (*TCBS.get_mut())[i].entry_point = entries[i];
+                (*TCBS.get_mut())[i].context.elr_el1 = entries[i];
+                (*TCBS.get_mut())[i].context.spsr_el1 = 0x000; // EL0t
+                (*TCBS.get_mut())[i].context.sp_el0 = ustacks_base + (i as u64 + 1) * 4096;
             }
             // else: stays Inactive (from EMPTY_TCB)
         }
@@ -182,20 +182,20 @@ pub fn schedule(frame: &mut TrapFrame) {
         // Save current task's context from the TrapFrame
         core::ptr::copy_nonoverlapping(
             frame as *const TrapFrame,
-            &mut TCBS[old].context as *mut TrapFrame,
+            &mut (*TCBS.get_mut())[old].context as *mut TrapFrame,
             1,
         );
 
         // Mark old task as Ready (unless it's Blocked or Faulted)
-        if TCBS[old].state == TaskState::Running {
-            TCBS[old].state = TaskState::Ready;
+        if (*TCBS.get_mut())[old].state == TaskState::Running {
+            (*TCBS.get_mut())[old].state = TaskState::Ready;
         }
 
         // Auto-restart: check if any Faulted task has waited long enough
         let now = crate::timer::tick_count();
         for i in 0..NUM_TASKS {
-            if TCBS[i].state == TaskState::Faulted
-                && now.wrapping_sub(TCBS[i].fault_tick) >= RESTART_DELAY_TICKS
+            if (*TCBS.get_mut())[i].state == TaskState::Faulted
+                && now.wrapping_sub((*TCBS.get_mut())[i].fault_tick) >= RESTART_DELAY_TICKS
             {
                 restart_task(i);
             }
@@ -209,12 +209,12 @@ pub fn schedule(frame: &mut TrapFrame) {
         let mut found = false;
         for offset in 0..NUM_TASKS {
             let idx = (old + 1 + offset) % NUM_TASKS;
-            if TCBS[idx].state == TaskState::Ready {
+            if (*TCBS.get_mut())[idx].state == TaskState::Ready {
                 // Check time budget (0 = unlimited)
-                let budget_ok = TCBS[idx].time_budget == 0
-                    || TCBS[idx].ticks_used < TCBS[idx].time_budget;
-                if budget_ok && (TCBS[idx].priority as i16) > best_prio {
-                    best_prio = TCBS[idx].priority as i16;
+                let budget_ok = (*TCBS.get_mut())[idx].time_budget == 0
+                    || (*TCBS.get_mut())[idx].ticks_used < (*TCBS.get_mut())[idx].time_budget;
+                if budget_ok && ((*TCBS.get_mut())[idx].priority as i16) > best_prio {
+                    best_prio = (*TCBS.get_mut())[idx].priority as i16;
                     next = idx;
                     found = true;
                 }
@@ -224,19 +224,19 @@ pub fn schedule(frame: &mut TrapFrame) {
         if !found {
             // No ready task with budget — force idle
             next = IDLE_TASK_ID;
-            if TCBS[IDLE_TASK_ID].state == TaskState::Faulted {
+            if (*TCBS.get_mut())[IDLE_TASK_ID].state == TaskState::Faulted {
                 restart_task(IDLE_TASK_ID);
             }
-            TCBS[IDLE_TASK_ID].state = TaskState::Ready;
+            (*TCBS.get_mut())[IDLE_TASK_ID].state = TaskState::Ready;
         }
 
         // Switch to new task
-        TCBS[next].state = TaskState::Running;
+        (*TCBS.get_mut())[next].state = TaskState::Running;
         *CURRENT.get_mut() = next;
 
         // Load new task's context into the frame.
         core::ptr::copy_nonoverlapping(
-            &TCBS[next].context as *const TrapFrame,
+            &(*TCBS.get_mut())[next].context as *const TrapFrame,
             frame as *mut TrapFrame,
             1,
         );
@@ -244,7 +244,7 @@ pub fn schedule(frame: &mut TrapFrame) {
         // Phase H: Switch TTBR0 to the new task's page table
         #[cfg(target_arch = "aarch64")]
         {
-            let ttbr0 = TCBS[next].ttbr0;
+            let ttbr0 = (*TCBS.get_mut())[next].ttbr0;
             core::arch::asm!(
                 "msr ttbr0_el1, {val}",
                 "isb",
@@ -258,27 +258,27 @@ pub fn schedule(frame: &mut TrapFrame) {
 /// Get current task ID
 pub fn current_task_id() -> u16 {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-    unsafe { TCBS[*CURRENT.get()].id }
+    unsafe { (*TCBS.get_mut())[*CURRENT.get()].id }
 }
 
 /// Set task state (used by IPC to block/unblock tasks)
 pub fn set_task_state(task_idx: usize, state: TaskState) {
     if task_idx < NUM_TASKS {
         // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-        unsafe { TCBS[task_idx].state = state; }
+        unsafe { (*TCBS.get_mut())[task_idx].state = state; }
     }
 }
 
 /// Get a register value from a task's saved context
 pub fn get_task_reg(task_idx: usize, reg: usize) -> u64 {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-    unsafe { TCBS[task_idx].context.x[reg] }
+    unsafe { (*TCBS.get_mut())[task_idx].context.x[reg] }
 }
 
 /// Set a register value in a task's saved context
 pub fn set_task_reg(task_idx: usize, reg: usize, val: u64) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-    unsafe { TCBS[task_idx].context.x[reg] = val; }
+    unsafe { (*TCBS.get_mut())[task_idx].context.x[reg] = val; }
 }
 
 /// Save the current TrapFrame into a task's TCB context
@@ -287,7 +287,7 @@ pub fn save_frame(task_idx: usize, frame: &TrapFrame) {
     unsafe {
         core::ptr::copy_nonoverlapping(
             frame as *const TrapFrame,
-            &mut TCBS[task_idx].context as *mut TrapFrame,
+            &mut (*TCBS.get_mut())[task_idx].context as *mut TrapFrame,
             1,
         );
     }
@@ -298,7 +298,7 @@ pub fn load_frame(task_idx: usize, frame: &mut TrapFrame) {
     // SAFETY: src and dst are valid pointers to non-overlapping TrapFrame-sized memory within static TCBS array.
     unsafe {
         core::ptr::copy_nonoverlapping(
-            &TCBS[task_idx].context as *const TrapFrame,
+            &(*TCBS.get_mut())[task_idx].context as *const TrapFrame,
             frame as *mut TrapFrame,
             1,
         );
@@ -311,17 +311,17 @@ pub fn fault_current_task(frame: &mut TrapFrame) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         let current = *CURRENT.get();
-        let id = TCBS[current].id;
+        let id = (*TCBS.get_mut())[current].id;
 
         uart_print("[AegisOS] TASK ");
         crate::uart_print_hex(id as u64);
         uart_print(" FAULTED\n");
 
-        TCBS[current].state = TaskState::Faulted;
-        TCBS[current].fault_tick = crate::timer::tick_count();
+        (*TCBS.get_mut())[current].state = TaskState::Faulted;
+        (*TCBS.get_mut())[current].fault_tick = crate::timer::tick_count();
 
         // Phase K: Restore base priority (undo any inheritance)
-        TCBS[current].priority = TCBS[current].base_priority;
+        (*TCBS.get_mut())[current].priority = (*TCBS.get_mut())[current].base_priority;
 
         // Clean up IPC endpoints — unblock any partner waiting for this task
         crate::ipc::cleanup_task(current);
@@ -343,41 +343,41 @@ pub fn restart_task(task_idx: usize) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     // ptr::write_bytes: pointer targets valid TrapFrame/stack memory within static TCBS array and linker-placed sections.
     unsafe {
-        if TCBS[task_idx].state != TaskState::Faulted {
+        if (*TCBS.get_mut())[task_idx].state != TaskState::Faulted {
             return;
         }
 
-        let id = TCBS[task_idx].id;
+        let id = (*TCBS.get_mut())[task_idx].id;
 
         // Zero user stack (4KB) to prevent state leakage
         // Only on AArch64 — on host tests, user_stack_top is a fake address
         #[cfg(target_arch = "aarch64")]
         {
-            let ustack_top = TCBS[task_idx].user_stack_top;
+            let ustack_top = (*TCBS.get_mut())[task_idx].user_stack_top;
             let ustack_base = (ustack_top - 4096) as *mut u8;
             core::ptr::write_bytes(ustack_base, 0, 4096);
         }
 
         // Zero entire TrapFrame
         core::ptr::write_bytes(
-            &mut TCBS[task_idx].context as *mut TrapFrame as *mut u8,
+            &mut (*TCBS.get_mut())[task_idx].context as *mut TrapFrame as *mut u8,
             0,
             core::mem::size_of::<TrapFrame>(),
         );
 
         // Reload entry point, stack, SPSR
-        TCBS[task_idx].context.elr_el1 = TCBS[task_idx].entry_point;
-        TCBS[task_idx].context.spsr_el1 = 0x000; // EL0t
-        TCBS[task_idx].context.sp_el0 = TCBS[task_idx].user_stack_top;
+        (*TCBS.get_mut())[task_idx].context.elr_el1 = (*TCBS.get_mut())[task_idx].entry_point;
+        (*TCBS.get_mut())[task_idx].context.spsr_el1 = 0x000; // EL0t
+        (*TCBS.get_mut())[task_idx].context.sp_el0 = (*TCBS.get_mut())[task_idx].user_stack_top;
 
-        TCBS[task_idx].state = TaskState::Ready;
-        TCBS[task_idx].notify_pending = 0;
-        TCBS[task_idx].notify_waiting = false;
+        (*TCBS.get_mut())[task_idx].state = TaskState::Ready;
+        (*TCBS.get_mut())[task_idx].notify_pending = 0;
+        (*TCBS.get_mut())[task_idx].notify_waiting = false;
 
         // Phase K: Reset scheduling state on restart
-        TCBS[task_idx].priority = TCBS[task_idx].base_priority;
-        TCBS[task_idx].ticks_used = 0;
-        TCBS[task_idx].last_heartbeat = crate::timer::tick_count();
+        (*TCBS.get_mut())[task_idx].priority = (*TCBS.get_mut())[task_idx].base_priority;
+        (*TCBS.get_mut())[task_idx].ticks_used = 0;
+        (*TCBS.get_mut())[task_idx].last_heartbeat = crate::timer::tick_count();
 
         uart_print("[AegisOS] TASK ");
         crate::uart_print_hex(id as u64);
@@ -394,7 +394,7 @@ pub fn epoch_reset() {
     unsafe {
         *EPOCH_TICKS.get_mut() = 0;
         for i in 0..NUM_TASKS {
-            TCBS[i].ticks_used = 0;
+            (*TCBS.get_mut())[i].ticks_used = 0;
         }
     }
 }
@@ -407,24 +407,24 @@ pub fn watchdog_scan() {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         for i in 0..NUM_TASKS {
-            let hb = TCBS[i].heartbeat_interval;
+            let hb = (*TCBS.get_mut())[i].heartbeat_interval;
             if hb == 0 {
                 continue; // watchdog disabled for this task
             }
-            if TCBS[i].state == TaskState::Faulted || TCBS[i].state == TaskState::Inactive {
+            if (*TCBS.get_mut())[i].state == TaskState::Faulted || (*TCBS.get_mut())[i].state == TaskState::Inactive {
                 continue; // already faulted or inactive
             }
-            let elapsed = now.wrapping_sub(TCBS[i].last_heartbeat);
+            let elapsed = now.wrapping_sub((*TCBS.get_mut())[i].last_heartbeat);
             if elapsed > hb {
                 #[cfg(target_arch = "aarch64")]
                 {
                     uart_print("[AegisOS] WATCHDOG: task ");
-                    crate::uart_print_hex(TCBS[i].id as u64);
+                    crate::uart_print_hex((*TCBS.get_mut())[i].id as u64);
                     uart_print(" missed heartbeat\n");
                 }
-                TCBS[i].state = TaskState::Faulted;
-                TCBS[i].fault_tick = now;
-                TCBS[i].priority = TCBS[i].base_priority;
+                (*TCBS.get_mut())[i].state = TaskState::Faulted;
+                (*TCBS.get_mut())[i].fault_tick = now;
+                (*TCBS.get_mut())[i].priority = (*TCBS.get_mut())[i].base_priority;
                 crate::ipc::cleanup_task(i);
             }
         }
@@ -436,7 +436,7 @@ pub fn watchdog_scan() {
 pub fn set_task_priority(task_idx: usize, priority: u8) {
     if task_idx < NUM_TASKS {
         // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-        unsafe { TCBS[task_idx].priority = priority; }
+        unsafe { (*TCBS.get_mut())[task_idx].priority = priority; }
     }
 }
 
@@ -444,7 +444,7 @@ pub fn set_task_priority(task_idx: usize, priority: u8) {
 pub fn get_task_priority(task_idx: usize) -> u8 {
     if task_idx < NUM_TASKS {
         // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-        unsafe { TCBS[task_idx].priority }
+        unsafe { (*TCBS.get_mut())[task_idx].priority }
     } else {
         0
     }
@@ -454,7 +454,7 @@ pub fn get_task_priority(task_idx: usize) -> u8 {
 pub fn get_task_base_priority(task_idx: usize) -> u8 {
     if task_idx < NUM_TASKS {
         // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-        unsafe { TCBS[task_idx].base_priority }
+        unsafe { (*TCBS.get_mut())[task_idx].base_priority }
     } else {
         0
     }
@@ -464,7 +464,7 @@ pub fn get_task_base_priority(task_idx: usize) -> u8 {
 pub fn restore_base_priority(task_idx: usize) {
     if task_idx < NUM_TASKS {
         // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-        unsafe { TCBS[task_idx].priority = TCBS[task_idx].base_priority; }
+        unsafe { (*TCBS.get_mut())[task_idx].priority = (*TCBS.get_mut())[task_idx].base_priority; }
     }
 }
 
@@ -473,8 +473,8 @@ pub fn record_heartbeat(task_idx: usize, interval: u64) {
     if task_idx < NUM_TASKS {
         // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
         unsafe {
-            TCBS[task_idx].heartbeat_interval = interval;
-            TCBS[task_idx].last_heartbeat = crate::timer::tick_count();
+            (*TCBS.get_mut())[task_idx].heartbeat_interval = interval;
+            (*TCBS.get_mut())[task_idx].last_heartbeat = crate::timer::tick_count();
         }
     }
 }
@@ -491,11 +491,11 @@ pub fn bootstrap() -> ! {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     // Inline asm: sets TTBR0_EL1, ELR_EL1, SPSR_EL1, SP_EL0 and erets into EL0 user task. Called at EL1.
     unsafe {
-        TCBS[0].state = TaskState::Running;
+        (*TCBS.get_mut())[0].state = TaskState::Running;
         *CURRENT.get_mut() = 0;
 
-        let frame = &TCBS[0].context;
-        let ttbr0 = TCBS[0].ttbr0;
+        let frame = &(*TCBS.get_mut())[0].context;
+        let ttbr0 = (*TCBS.get_mut())[0].ttbr0;
 
         // Load the task's context into registers and eret into EL0
         core::arch::asm!(

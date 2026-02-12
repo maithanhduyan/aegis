@@ -369,7 +369,7 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
     // ─── Phase G: Capability check ─────────────────────────────────
     let required = crate::cap::cap_for_syscall(syscall_nr, ep_id);
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
-    let task_caps = unsafe { crate::sched::TCBS[*crate::sched::CURRENT.get()].caps };
+    let task_caps = unsafe { (*crate::sched::TCBS.get_mut())[*crate::sched::CURRENT.get()].caps };
 
     if !crate::cap::cap_check(task_caps, required) {
         uart_print("!!! CAP DENIED: task ");
@@ -466,15 +466,15 @@ fn handle_notify(frame: &mut TrapFrame) {
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     unsafe {
         // OR-merge notification bits into target's pending mask
-        crate::sched::TCBS[target_id].notify_pending |= bits;
+        (*crate::sched::TCBS.get_mut())[target_id].notify_pending |= bits;
 
         // If the target is blocked waiting for notifications, unblock it
-        if crate::sched::TCBS[target_id].notify_waiting {
-            crate::sched::TCBS[target_id].notify_waiting = false;
+        if (*crate::sched::TCBS.get_mut())[target_id].notify_waiting {
+            (*crate::sched::TCBS.get_mut())[target_id].notify_waiting = false;
 
             // Deliver pending bits into the target's x0 and clear
-            let pending = crate::sched::TCBS[target_id].notify_pending;
-            crate::sched::TCBS[target_id].notify_pending = 0;
+            let pending = (*crate::sched::TCBS.get_mut())[target_id].notify_pending;
+            (*crate::sched::TCBS.get_mut())[target_id].notify_pending = 0;
             crate::sched::set_task_reg(target_id, 0, pending);
 
             crate::sched::set_task_state(target_id, crate::sched::TaskState::Ready);
@@ -491,15 +491,15 @@ fn handle_wait_notify(frame: &mut TrapFrame) {
     unsafe {
         let current = *crate::sched::CURRENT.get();
 
-        let pending = crate::sched::TCBS[current].notify_pending;
+        let pending = (*crate::sched::TCBS.get_mut())[current].notify_pending;
         if pending != 0 {
             // Notifications already pending — deliver immediately
             frame.x[0] = pending;
-            crate::sched::TCBS[current].notify_pending = 0;
+            (*crate::sched::TCBS.get_mut())[current].notify_pending = 0;
         } else {
             // No pending notifications — block and wait
             crate::sched::save_frame(current, frame);
-            crate::sched::TCBS[current].notify_waiting = true;
+            (*crate::sched::TCBS.get_mut())[current].notify_waiting = true;
             crate::sched::set_task_state(current, crate::sched::TaskState::Blocked);
             crate::sched::schedule(frame);
         }

@@ -9,6 +9,7 @@
 ///   SYS_CALL = 3: send + recv (client call pattern)
 
 use crate::exception::TrapFrame;
+use crate::kernel::cell::KernelCell;
 use crate::sched::{self, TaskState};
 use crate::uart_print;
 
@@ -99,7 +100,7 @@ pub const EMPTY_EP: Endpoint = Endpoint {
     receiver: None,
 };
 
-pub static mut ENDPOINTS: [Endpoint; MAX_ENDPOINTS] = [EMPTY_EP; MAX_ENDPOINTS];
+pub static ENDPOINTS: KernelCell<[Endpoint; MAX_ENDPOINTS]> = KernelCell::new([EMPTY_EP; MAX_ENDPOINTS]);
 
 // ─── IPC operations ────────────────────────────────────────────────
 
@@ -115,14 +116,14 @@ pub fn sys_send(frame: &mut TrapFrame, ep_id: usize) {
 
     // SAFETY: Single-core kernel, interrupts masked during kernel execution.
     // No concurrent access on uniprocessor QEMU virt.
-    // Accesses static mut ENDPOINTS; calls sched functions that access TCBS/CURRENT.
+    // Accesses KernelCell ENDPOINTS; calls sched functions that access TCBS/CURRENT.
     unsafe {
         let current = sched::current_task_id() as usize;
 
         // Save current frame to TCB so copy_message can read from it
         sched::save_frame(current, frame);
 
-        if let Some(recv_task) = ENDPOINTS[ep_id].receiver.take() {
+        if let Some(recv_task) = (*ENDPOINTS.get_mut())[ep_id].receiver.take() {
             // Receiver is waiting — deliver message directly
             copy_message(current, recv_task);
 
@@ -135,7 +136,7 @@ pub fn sys_send(frame: &mut TrapFrame, ep_id: usize) {
             // Sender continues (not blocked)
         } else {
             // No receiver — enqueue sender and block
-            if !ENDPOINTS[ep_id].sender_queue.push(current) {
+            if !(*ENDPOINTS.get_mut())[ep_id].sender_queue.push(current) {
                 uart_print("!!! IPC: sender queue full\n");
                 return;
             }
@@ -156,14 +157,14 @@ pub fn sys_recv(frame: &mut TrapFrame, ep_id: usize) {
 
     // SAFETY: Single-core kernel, interrupts masked during kernel execution.
     // No concurrent access on uniprocessor QEMU virt.
-    // Accesses static mut ENDPOINTS; calls sched functions that access TCBS/CURRENT.
+    // Accesses KernelCell ENDPOINTS; calls sched functions that access TCBS/CURRENT.
     unsafe {
         let current = sched::current_task_id() as usize;
 
         // Save current frame to TCB
         sched::save_frame(current, frame);
 
-        if let Some(send_task) = ENDPOINTS[ep_id].sender_queue.pop() {
+        if let Some(send_task) = (*ENDPOINTS.get_mut())[ep_id].sender_queue.pop() {
             // Sender is waiting — receive message directly
             copy_message(send_task, current);
 
@@ -177,7 +178,7 @@ pub fn sys_recv(frame: &mut TrapFrame, ep_id: usize) {
             sched::load_frame(current, frame);
         } else {
             // No sender — block receiver and wait
-            ENDPOINTS[ep_id].receiver = Some(current);
+            (*ENDPOINTS.get_mut())[ep_id].receiver = Some(current);
             sched::set_task_state(current, TaskState::Blocked);
             sched::schedule(frame);
         }
@@ -194,14 +195,14 @@ pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
 
     // SAFETY: Single-core kernel, interrupts masked during kernel execution.
     // No concurrent access on uniprocessor QEMU virt.
-    // Accesses static mut ENDPOINTS; calls sched functions that access TCBS/CURRENT.
+    // Accesses KernelCell ENDPOINTS; calls sched functions that access TCBS/CURRENT.
     unsafe {
         let current = sched::current_task_id() as usize;
 
         // Save current frame to TCB so message can be copied
         sched::save_frame(current, frame);
 
-        if let Some(recv_task) = ENDPOINTS[ep_id].receiver.take() {
+        if let Some(recv_task) = (*ENDPOINTS.get_mut())[ep_id].receiver.take() {
             // Receiver is waiting — deliver message
             copy_message(current, recv_task);
 
@@ -211,7 +212,7 @@ pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
             sched::set_task_state(recv_task, TaskState::Ready);
 
             // Now block ourselves waiting for reply
-            ENDPOINTS[ep_id].receiver = Some(current);
+            (*ENDPOINTS.get_mut())[ep_id].receiver = Some(current);
 
             // Phase K4: Boost the receiver if our priority is higher
             // (prevents priority inversion during call-reply pattern)
@@ -221,7 +222,7 @@ pub fn sys_call(frame: &mut TrapFrame, ep_id: usize) {
             sched::schedule(frame);
         } else {
             // No receiver — enqueue as sender, will also need reply
-            if !ENDPOINTS[ep_id].sender_queue.push(current) {
+            if !(*ENDPOINTS.get_mut())[ep_id].sender_queue.push(current) {
                 uart_print("!!! IPC: sender queue full\n");
                 return;
             }
@@ -263,15 +264,15 @@ fn maybe_boost_priority(blocker: usize, holder: usize) {
 pub fn cleanup_task(task_idx: usize) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution.
     // No concurrent access on uniprocessor QEMU virt.
-    // Accesses static mut ENDPOINTS to clear faulted task from all endpoint slots.
+    // Accesses KernelCell ENDPOINTS to clear faulted task from all endpoint slots.
     unsafe {
         for i in 0..MAX_ENDPOINTS {
             // If the faulted task was a pending sender, remove from queue
-            ENDPOINTS[i].sender_queue.remove(task_idx);
+            (*ENDPOINTS.get_mut())[i].sender_queue.remove(task_idx);
 
             // If the faulted task was a pending receiver, clear the slot
-            if ENDPOINTS[i].receiver == Some(task_idx) {
-                ENDPOINTS[i].receiver = None;
+            if (*ENDPOINTS.get_mut())[i].receiver == Some(task_idx) {
+                (*ENDPOINTS.get_mut())[i].receiver = None;
             }
         }
     }
