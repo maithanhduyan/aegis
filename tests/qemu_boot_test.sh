@@ -79,9 +79,11 @@ check "Arch separation L2"          "[AegisOS] arch separation: complete"
 check "ELF64 parser ready"          "[AegisOS] ELF64 parser ready"
 check "ELF loader ready"            "[AegisOS] ELF loader ready"
 check "ELF task loaded"             "[AegisOS] task 2 loaded from ELF"
+check "L5 ELF binary loaded"        "[AegisOS] client task loaded from ELF binary"
 check "Timer started"               "[AegisOS] timer started"
 check "Bootstrap into EL0"          "[AegisOS] bootstrapping into uart_driver"
 check "UART driver ready"           "DRV:ready"
+check "L5 ELF task output"          "L5:ELF"
 check "User-mode driver output"     "J4:UserDrv"
 
 # ─── Summary ───────────────────────────────────────────────────────

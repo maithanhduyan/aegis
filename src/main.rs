@@ -409,8 +409,8 @@ pub extern "C" fn kernel_main() -> ! {
         sched::TCBS[1].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
             | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE
             | CAP_HEARTBEAT;
-        // Task 2 (idle): only needs YIELD (WFI loop)
-        sched::TCBS[2].caps = CAP_YIELD;
+        // Task 2 (idle / ELF-loaded): needs YIELD + WRITE (L5 ELF task uses SYS_WRITE)
+        sched::TCBS[2].caps = CAP_YIELD | CAP_WRITE;
     }
     uart_print("[AegisOS] capabilities assigned\n");
 
@@ -426,10 +426,11 @@ pub extern "C" fn kernel_main() -> ! {
         sched::TCBS[1].base_priority = 4;
         sched::TCBS[1].time_budget = 50;
 
-        // Task 2 (idle): lowest priority, unlimited budget
-        sched::TCBS[2].priority = 0;
-        sched::TCBS[2].base_priority = 0;
-        sched::TCBS[2].time_budget = 0; // unlimited
+        // Task 2 (ELF demo): runs briefly at boot to prove ELF loading,
+        // then defers to task 1 once its 2-tick budget is exhausted.
+        sched::TCBS[2].priority = 5;
+        sched::TCBS[2].base_priority = 5;
+        sched::TCBS[2].time_budget = 2; // 2 ticks, then defer
     }
     uart_print("[AegisOS] priority scheduler configured\n");
     uart_print("[AegisOS] time budget enforcement enabled\n");
@@ -455,7 +456,7 @@ pub extern "C" fn kernel_main() -> ! {
 
     // ─── Phase L3: ELF64 Parser ────────────────────────────────────
     uart_print("[AegisOS] ELF64 parser ready\n");
-    // ─── Phase L4: ELF Loader ──────────────────────────────────────────
+    // ─── Phase L4/L5: ELF Loader + Demo Binary ─────────────────────────
     uart_print("[AegisOS] ELF loader ready\n");
     {
         extern "C" {
@@ -467,62 +468,20 @@ pub extern "C" fn kernel_main() -> ! {
             (&__elf_load_end as *const u8 as u64) - load_base
         } as usize;
 
-        // AArch64 yield loop: mov x7,#0 / svc #0 / b -8
-        static YIELD_CODE: [u8; 12] = [
-            0x07, 0x00, 0x80, 0xd2, // mov x7, #0 (SYS_YIELD)
-            0x01, 0x00, 0x00, 0xd4, // svc #0
-            0xfe, 0xff, 0xff, 0x17, // b -8
-        ];
+        // Phase L5: embed real user-space ELF binary (built separately)
+        static USER_ELF: &[u8] = include_bytes!("../user/hello/target/aarch64-user/release/hello");
 
-        // Build synthetic ELF64: header (64B) + 1 PT_LOAD phdr (56B) + code (12B)
-        let mut elf = [0u8; 256];
-        // ELF header
-        elf[0] = 0x7f; elf[1] = b'E'; elf[2] = b'L'; elf[3] = b'F';
-        elf[4] = 2;     // ELFCLASS64
-        elf[5] = 1;     // ELFDATA2LSB
-        elf[6] = 1;     // EV_CURRENT
-        elf[16] = 2;    // e_type = ET_EXEC
-        elf[18] = 0xB7; // e_machine = EM_AARCH64 (183)
-        elf[20] = 1;    // e_version
-        // e_entry = load_base
-        let vb = load_base.to_le_bytes();
-        elf[24] = vb[0]; elf[25] = vb[1]; elf[26] = vb[2]; elf[27] = vb[3];
-        elf[28] = vb[4]; elf[29] = vb[5]; elf[30] = vb[6]; elf[31] = vb[7];
-        elf[32] = 64;   // e_phoff = 64
-        elf[52] = 64;   // e_ehsize = 64
-        elf[54] = 56;   // e_phentsize = 56
-        elf[56] = 1;    // e_phnum = 1
-        // Program header (56 bytes at offset 64)
-        elf[64] = 1;    // p_type = PT_LOAD
-        elf[68] = 5;    // p_flags = PF_R | PF_X
-        elf[72] = 120;  // p_offset = 120 (code at byte 120)
-        // p_vaddr = load_base
-        elf[80] = vb[0]; elf[81] = vb[1]; elf[82] = vb[2]; elf[83] = vb[3];
-        elf[84] = vb[4]; elf[85] = vb[5]; elf[86] = vb[6]; elf[87] = vb[7];
-        // p_paddr = load_base
-        elf[88] = vb[0]; elf[89] = vb[1]; elf[90] = vb[2]; elf[91] = vb[3];
-        elf[92] = vb[4]; elf[93] = vb[5]; elf[94] = vb[6]; elf[95] = vb[7];
-        elf[96] = 12;   // p_filesz = 12
-        // p_memsz = 4096 (full page, BSS-zeroed)
-        elf[104] = 0x00; elf[105] = 0x10;
-        // Code bytes at offset 120
-        let mut ci = 0;
-        while ci < YIELD_CODE.len() {
-            elf[120 + ci] = YIELD_CODE[ci];
-            ci += 1;
-        }
-
-        // Parse the synthetic ELF
-        if let Ok(info) = aegis_os::elf::parse_elf64(&elf) {
+        // Parse the embedded ELF
+        if let Ok(info) = aegis_os::elf::parse_elf64(USER_ELF) {
             let dest = unsafe { &__elf_load_start as *const u8 as *mut u8 };
             let result = unsafe {
-                aegis_os::elf::load_elf_segments(&elf, &info, dest, load_base, load_size)
+                aegis_os::elf::load_elf_segments(USER_ELF, &info, dest, load_base, load_size)
             };
-            if result.is_ok() {
+            if let Ok(entry) = result {
                 // Cache maintenance: flush D-cache, invalidate I-cache
                 unsafe {
                     let mut addr = load_base;
-                    let end = load_base + 4096;
+                    let end = load_base + load_size as u64;
                     while addr < end {
                         core::arch::asm!(
                             "dc cvau, {addr}",
@@ -539,19 +498,37 @@ pub extern "C" fn kernel_main() -> ! {
                         options(nomem, nostack)
                     );
                 }
-                // Set page permissions: USER_CODE_PAGE for task 2
+                // Set page permissions per segment
                 unsafe {
                     use aegis_os::mmu;
-                    mmu::set_page_attr(2, load_base, mmu::USER_CODE_PAGE);
+                    for i in 0..info.num_segments {
+                        if let Some(seg) = info.segments[i] {
+                            let template = if seg.flags & aegis_os::elf::PF_X != 0 {
+                                mmu::USER_CODE_PAGE
+                            } else if seg.flags & aegis_os::elf::PF_W != 0 {
+                                mmu::USER_DATA_PAGE
+                            } else {
+                                mmu::KERNEL_RODATA_PAGE
+                            };
+                            let seg_start = seg.vaddr & !0xFFF;
+                            let seg_end = (seg.vaddr + seg.memsz + 0xFFF) & !0xFFF;
+                            let mut page = seg_start;
+                            while page < seg_end {
+                                mmu::set_page_attr(2, page, template);
+                                page += 4096;
+                            }
+                        }
+                    }
                 }
-                // Override idle task (task 2) with ELF-loaded entry point
+                // Override task 2 with ELF-loaded entry point
                 unsafe {
-                    sched::TCBS[2].entry_point = load_base;
-                    sched::TCBS[2].context.elr_el1 = load_base;
+                    sched::TCBS[2].entry_point = entry;
+                    sched::TCBS[2].context.elr_el1 = entry;
                 }
                 uart_print("[AegisOS] task 2 loaded from ELF (entry=0x");
-                aegis_os::uart_print_hex(load_base);
+                aegis_os::uart_print_hex(entry);
                 uart_print(")\n");
+                uart_print("[AegisOS] client task loaded from ELF binary\n");
             }
         }
     }

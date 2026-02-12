@@ -70,9 +70,10 @@ SECTIONS
     }
     __grant_pages_end = .;
 
-    /* === ELF Load Region (3 × 4KB = 12 KiB, 4KB-aligned) === */
-    /* Writable pages for loading ELF binary segments (Phase L4) */
-    . = ALIGN(4096);
+    /* === ELF Load Region (3 × 4KB = 12 KiB, fixed address for user binary linkage) === */
+    /* Writable pages for loading ELF binary segments (Phase L4/L5) */
+    /* Fixed at 0x4010_0000 so user binaries can link at a known address */
+    . = 0x40100000;
     __elf_load_start = .;
     .elf_load (NOLOAD) : {
         . += 3 * 4096;

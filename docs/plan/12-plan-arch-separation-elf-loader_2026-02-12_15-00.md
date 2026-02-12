@@ -946,8 +946,8 @@ Bit 19–63:  Reserved (45–46 bits còn trống)
 2. [x] **Triển khai L1** (Module Structure) — ✅ 162 tests + 19 QEMU checkpoints
 3. [x] **Triển khai L2** (Tách Arch Code) — ✅ 162 tests + 20 QEMU checkpoints
 4. [x] **Triển khai L3** (ELF Parser) — ✅ 174 tests + 21 QEMU checkpoints
-5. [ ] **Triển khai L4** (ELF Loader) — sau L2+L3 merge (handoff → Aegis-Agent)
-6. [ ] **Triển khai L5** (Demo Binary) — proof of concept (handoff → Aegis-Agent)
+5. [x] **Triển khai L4** (ELF Loader) — ✅ 183 tests + 23 QEMU checkpoints
+6. [x] **Triển khai L5** (Demo Binary) — ✅ 183 tests + 25 QEMU checkpoints
 7. [ ] **Triển khai L6** (Tests) — ~25 host tests + 3 QEMU checkpoints (handoff → Aegis-Agent)
 8. [ ] **Viết blog #12** — giải thích arch separation + ELF loading cho học sinh lớp 5 (handoff → Aegis-StoryTeller)
 9. [ ] **Chạy test suite** — ~187 host tests + 21 QEMU checkpoints (handoff → Aegis-Tester)
