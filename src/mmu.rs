@@ -153,3 +153,22 @@ pub fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
     }
     0 // success
 }
+
+// ─── Phase L4: Page attribute manipulation ─────────────────────────
+
+/// Error: invalid task_id for set_page_attr
+pub const PAGE_ATTR_ERR_INVALID_TASK: u64 = 0xFFFF_3001;
+/// Error: vaddr outside L3-mapped range
+pub const PAGE_ATTR_ERR_OUT_OF_RANGE: u64 = 0xFFFF_3002;
+
+/// Host-test stub for set_page_attr — validates params, no actual write.
+pub fn set_page_attr(task_id: usize, vaddr: u64, _template: u64) -> u64 {
+    if task_id >= 3 {
+        return PAGE_ATTR_ERR_INVALID_TASK;
+    }
+    let base: u64 = 0x4000_0000;
+    if vaddr < base || vaddr >= base + 512 * 4096 {
+        return PAGE_ATTR_ERR_OUT_OF_RANGE;
+    }
+    0 // success
+}

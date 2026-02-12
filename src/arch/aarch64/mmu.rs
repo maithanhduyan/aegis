@@ -181,6 +181,8 @@ extern "C" {
     static __task_stacks_end: u8;
     static __grant_pages_start: u8;
     static __grant_pages_end: u8;
+    static __elf_load_start: u8;
+    static __elf_load_end: u8;
 }
 
 /// Get address of a linker symbol as usize
@@ -503,4 +505,56 @@ pub unsafe extern "C" fn mmu_get_config(out: *mut [u64; 4]) {
     (*out)[1] = TCR_VALUE;
     (*out)[2] = l1_kernel as u64; // TTBR0 = kernel boot table
     (*out)[3] = SCTLR_MMU_ON | SCTLR_WXN;
+}
+
+// ─── Phase L4: Page attribute manipulation ─────────────────────────
+
+/// Error: invalid task_id for set_page_attr
+pub const PAGE_ATTR_ERR_INVALID_TASK: u64 = 0xFFFF_3001;
+/// Error: vaddr outside L3-mapped range
+pub const PAGE_ATTR_ERR_OUT_OF_RANGE: u64 = 0xFFFF_3002;
+
+/// Set page descriptor for a specific virtual address in a task's L3 table.
+///
+/// `vaddr` must be 4KB-aligned and within the L3-mapped range
+/// (0x4000_0000..0x401F_FFFF). Performs TLB invalidation after update.
+///
+/// # Safety
+/// Caller must ensure `task_id < NUM_TASKS` and `vaddr` is page-aligned.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn set_page_attr(task_id: usize, vaddr: u64, template: u64) -> u64 {
+    if task_id >= 3 {
+        return PAGE_ATTR_ERR_INVALID_TASK;
+    }
+    let base: u64 = 0x4000_0000;
+    if vaddr < base || vaddr >= base + 512 * 4096 {
+        return PAGE_ATTR_ERR_OUT_OF_RANGE;
+    }
+    let index = ((vaddr - base) / 4096) as usize;
+    let l3 = table_ptr(PT_L3_TASK0 + task_id);
+    write_entry(l3, index, vaddr | template);
+
+    // TLB invalidate for this task's ASID
+    let asid = (task_id as u64 + 1) << 48;
+    core::arch::asm!(
+        "tlbi aside1is, {asid}",
+        "dsb ish",
+        "isb",
+        asid = in(reg) asid,
+        options(nomem, nostack)
+    );
+    0 // success
+}
+
+/// Host-test stub for set_page_attr
+#[cfg(not(target_arch = "aarch64"))]
+pub fn set_page_attr(task_id: usize, vaddr: u64, _template: u64) -> u64 {
+    if task_id >= 3 {
+        return PAGE_ATTR_ERR_INVALID_TASK;
+    }
+    let base: u64 = 0x4000_0000;
+    if vaddr < base || vaddr >= base + 512 * 4096 {
+        return PAGE_ATTR_ERR_OUT_OF_RANGE;
+    }
+    0 // success
 }

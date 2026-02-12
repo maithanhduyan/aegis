@@ -455,7 +455,106 @@ pub extern "C" fn kernel_main() -> ! {
 
     // ─── Phase L3: ELF64 Parser ────────────────────────────────────
     uart_print("[AegisOS] ELF64 parser ready\n");
+    // ─── Phase L4: ELF Loader ──────────────────────────────────────────
+    uart_print("[AegisOS] ELF loader ready\n");
+    {
+        extern "C" {
+            static __elf_load_start: u8;
+            static __elf_load_end: u8;
+        }
+        let load_base = unsafe { &__elf_load_start as *const u8 as u64 };
+        let load_size = unsafe {
+            (&__elf_load_end as *const u8 as u64) - load_base
+        } as usize;
 
+        // AArch64 yield loop: mov x7,#0 / svc #0 / b -8
+        static YIELD_CODE: [u8; 12] = [
+            0x07, 0x00, 0x80, 0xd2, // mov x7, #0 (SYS_YIELD)
+            0x01, 0x00, 0x00, 0xd4, // svc #0
+            0xfe, 0xff, 0xff, 0x17, // b -8
+        ];
+
+        // Build synthetic ELF64: header (64B) + 1 PT_LOAD phdr (56B) + code (12B)
+        let mut elf = [0u8; 256];
+        // ELF header
+        elf[0] = 0x7f; elf[1] = b'E'; elf[2] = b'L'; elf[3] = b'F';
+        elf[4] = 2;     // ELFCLASS64
+        elf[5] = 1;     // ELFDATA2LSB
+        elf[6] = 1;     // EV_CURRENT
+        elf[16] = 2;    // e_type = ET_EXEC
+        elf[18] = 0xB7; // e_machine = EM_AARCH64 (183)
+        elf[20] = 1;    // e_version
+        // e_entry = load_base
+        let vb = load_base.to_le_bytes();
+        elf[24] = vb[0]; elf[25] = vb[1]; elf[26] = vb[2]; elf[27] = vb[3];
+        elf[28] = vb[4]; elf[29] = vb[5]; elf[30] = vb[6]; elf[31] = vb[7];
+        elf[32] = 64;   // e_phoff = 64
+        elf[52] = 64;   // e_ehsize = 64
+        elf[54] = 56;   // e_phentsize = 56
+        elf[56] = 1;    // e_phnum = 1
+        // Program header (56 bytes at offset 64)
+        elf[64] = 1;    // p_type = PT_LOAD
+        elf[68] = 5;    // p_flags = PF_R | PF_X
+        elf[72] = 120;  // p_offset = 120 (code at byte 120)
+        // p_vaddr = load_base
+        elf[80] = vb[0]; elf[81] = vb[1]; elf[82] = vb[2]; elf[83] = vb[3];
+        elf[84] = vb[4]; elf[85] = vb[5]; elf[86] = vb[6]; elf[87] = vb[7];
+        // p_paddr = load_base
+        elf[88] = vb[0]; elf[89] = vb[1]; elf[90] = vb[2]; elf[91] = vb[3];
+        elf[92] = vb[4]; elf[93] = vb[5]; elf[94] = vb[6]; elf[95] = vb[7];
+        elf[96] = 12;   // p_filesz = 12
+        // p_memsz = 4096 (full page, BSS-zeroed)
+        elf[104] = 0x00; elf[105] = 0x10;
+        // Code bytes at offset 120
+        let mut ci = 0;
+        while ci < YIELD_CODE.len() {
+            elf[120 + ci] = YIELD_CODE[ci];
+            ci += 1;
+        }
+
+        // Parse the synthetic ELF
+        if let Ok(info) = aegis_os::elf::parse_elf64(&elf) {
+            let dest = unsafe { &__elf_load_start as *const u8 as *mut u8 };
+            let result = unsafe {
+                aegis_os::elf::load_elf_segments(&elf, &info, dest, load_base, load_size)
+            };
+            if result.is_ok() {
+                // Cache maintenance: flush D-cache, invalidate I-cache
+                unsafe {
+                    let mut addr = load_base;
+                    let end = load_base + 4096;
+                    while addr < end {
+                        core::arch::asm!(
+                            "dc cvau, {addr}",
+                            addr = in(reg) addr,
+                            options(nomem, nostack)
+                        );
+                        addr += 64;
+                    }
+                    core::arch::asm!(
+                        "dsb ish",
+                        "ic iallu",
+                        "dsb ish",
+                        "isb",
+                        options(nomem, nostack)
+                    );
+                }
+                // Set page permissions: USER_CODE_PAGE for task 2
+                unsafe {
+                    use aegis_os::mmu;
+                    mmu::set_page_attr(2, load_base, mmu::USER_CODE_PAGE);
+                }
+                // Override idle task (task 2) with ELF-loaded entry point
+                unsafe {
+                    sched::TCBS[2].entry_point = load_base;
+                    sched::TCBS[2].context.elr_el1 = load_base;
+                }
+                uart_print("[AegisOS] task 2 loaded from ELF (entry=0x");
+                aegis_os::uart_print_hex(load_base);
+                uart_print(")\n");
+            }
+        }
+    }
     timer::init(10);
 
     uart_print("[AegisOS] bootstrapping into uart_driver (EL0)...\n");

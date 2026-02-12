@@ -107,6 +107,8 @@ Check-Output "Address spaces assigned" "[AegisOS] per-task address spaces assign
 Check-Output "Arch separation L1"     "[AegisOS] arch separation: module tree ready"
 Check-Output "Arch separation L2"     "[AegisOS] arch separation: complete"
 Check-Output "ELF64 parser ready"     "[AegisOS] ELF64 parser ready"
+Check-Output "ELF loader ready"       "[AegisOS] ELF loader ready"
+Check-Output "ELF task loaded"        "[AegisOS] task 2 loaded from ELF"
 Check-Output "Timer started"          "[AegisOS] timer started"
 Check-Output "Bootstrap into EL0"     "[AegisOS] bootstrapping into uart_driver"
 Check-Output "UART Driver ready"      "DRV:ready"

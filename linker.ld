@@ -70,6 +70,15 @@ SECTIONS
     }
     __grant_pages_end = .;
 
+    /* === ELF Load Region (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    /* Writable pages for loading ELF binary segments (Phase L4) */
+    . = ALIGN(4096);
+    __elf_load_start = .;
+    .elf_load (NOLOAD) : {
+        . += 3 * 4096;
+    }
+    __elf_load_end = .;
+
     /* === Stack Guard Page (4KB invalid — catches stack overflow) === */
     . = ALIGN(4096);
     __stack_guard = .;

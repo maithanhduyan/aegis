@@ -35,7 +35,7 @@ use aegis_os::cap::{
 };
 use aegis_os::grant::{self, EMPTY_GRANT, MAX_GRANTS};
 use aegis_os::irq::{self, EMPTY_BINDING, MAX_IRQ_BINDINGS};
-use aegis_os::elf::{self, ElfError, ElfSegment, ElfInfo, MAX_SEGMENTS, PF_R, PF_W, PF_X};
+use aegis_os::elf::{self, ElfError, ElfLoadError, ElfSegment, ElfInfo, MAX_SEGMENTS, PF_R, PF_W, PF_X};
 
 // ─── Helper: read CURRENT safely (avoids static_mut_refs warning) ──
 
@@ -2324,4 +2324,142 @@ fn elf_parse_entry_point() {
     elf[28] = eb[4]; elf[29] = eb[5]; elf[30] = eb[6]; elf[31] = eb[7];
     let info = elf::parse_elf64(&elf).expect("should parse");
     assert_eq!(info.entry, entry);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 17. ELF Loader Tests (Phase L4)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn elf_validate_for_load_valid() {
+    let elf = build_test_elf(1);
+    let info = elf::parse_elf64(&elf).unwrap();
+    // Segment at 0x4010_0000, memsz=0x1000. Region: 0x4010_0000..+0x3000
+    let result = elf::validate_elf_for_load(&info, 0x4010_0000, 0x3000);
+    assert!(result.is_ok(), "valid ELF should pass validation");
+}
+
+#[test]
+fn elf_validate_for_load_vaddr_below_base() {
+    let elf = build_test_elf(1);
+    let info = elf::parse_elf64(&elf).unwrap();
+    // Segment vaddr=0x4010_0000, but load_base=0x4010_1000 → vaddr < base
+    assert_eq!(
+        elf::validate_elf_for_load(&info, 0x4010_1000, 0x3000),
+        Err(ElfLoadError::VaddrOutOfRange)
+    );
+}
+
+#[test]
+fn elf_validate_for_load_segment_too_large() {
+    let elf = build_test_elf(1);
+    let info = elf::parse_elf64(&elf).unwrap();
+    // Segment at 0x4010_0000 with memsz=0x1000, but load_size=0x800 → overflow
+    assert_eq!(
+        elf::validate_elf_for_load(&info, 0x4010_0000, 0x800),
+        Err(ElfLoadError::SegmentTooLarge)
+    );
+}
+
+#[test]
+fn elf_validate_for_load_wx_violation() {
+    let mut elf = build_test_elf(1);
+    // Change p_flags to PF_R|PF_W|PF_X = 7 (W^X violation)
+    elf[68] = 7;
+    let info = elf::parse_elf64(&elf).unwrap();
+    assert_eq!(
+        elf::validate_elf_for_load(&info, 0x4010_0000, 0x3000),
+        Err(ElfLoadError::WxViolation)
+    );
+}
+
+#[test]
+fn elf_validate_for_load_no_segments() {
+    let elf = build_test_elf(0);
+    let info = elf::parse_elf64(&elf).unwrap();
+    assert_eq!(info.num_segments, 0);
+    assert_eq!(
+        elf::validate_elf_for_load(&info, 0x4010_0000, 0x3000),
+        Err(ElfLoadError::NoSegments)
+    );
+}
+
+#[test]
+fn elf_validate_for_load_entry_out_of_range() {
+    let mut elf = build_test_elf(1);
+    // Set entry to 0x5000_0000 (outside load region 0x4010_0000..+0x3000)
+    let entry: u64 = 0x5000_0000;
+    let eb = entry.to_le_bytes();
+    elf[24] = eb[0]; elf[25] = eb[1]; elf[26] = eb[2]; elf[27] = eb[3];
+    elf[28] = eb[4]; elf[29] = eb[5]; elf[30] = eb[6]; elf[31] = eb[7];
+    let info = elf::parse_elf64(&elf).unwrap();
+    assert_eq!(
+        elf::validate_elf_for_load(&info, 0x4010_0000, 0x3000),
+        Err(ElfLoadError::VaddrOutOfRange)
+    );
+}
+
+#[test]
+fn elf_load_segments_copy_and_zero() {
+    let elf = build_test_elf(1);
+    let info = elf::parse_elf64(&elf).unwrap();
+    // Segment: vaddr=0x4010_0000, offset=0, filesz=64, memsz=0x1000
+    let mut dest = [0xFFu8; 0x2000]; // 8KB, pre-filled with 0xFF
+
+    unsafe {
+        let entry = elf::load_elf_segments(
+            &elf, &info,
+            dest.as_mut_ptr(), 0x4010_0000, dest.len()
+        ).unwrap();
+
+        assert_eq!(entry, 0x4010_0000);
+
+        // First 64 bytes: copied from elf[0..64] (segment data at p_offset=0)
+        for i in 0..64 {
+            assert_eq!(dest[i], elf[i], "byte {} should be copied from ELF", i);
+        }
+        // Bytes 64..0x1000: BSS region, zero-filled
+        for i in 64..0x1000 {
+            assert_eq!(dest[i], 0, "byte {} should be zero-filled (BSS)", i);
+        }
+        // Bytes beyond memsz: untouched (still 0xFF)
+        assert_eq!(dest[0x1000], 0xFF, "byte past memsz should be untouched");
+    }
+}
+
+#[test]
+fn elf_load_segments_rejects_invalid() {
+    let elf = build_test_elf(1);
+    let info = elf::parse_elf64(&elf).unwrap();
+    let mut dest = [0u8; 0x100]; // too small for memsz=0x1000
+
+    unsafe {
+        let result = elf::load_elf_segments(
+            &elf, &info,
+            dest.as_mut_ptr(), 0x4010_0000, dest.len()
+        );
+        assert_eq!(result, Err(ElfLoadError::SegmentTooLarge));
+    }
+}
+
+#[test]
+fn mmu_set_page_attr_host_stub() {
+    // Valid task and address
+    assert_eq!(mmu::set_page_attr(0, 0x4010_0000, mmu::USER_CODE_PAGE), 0);
+    assert_eq!(mmu::set_page_attr(2, 0x4000_0000, mmu::KERNEL_DATA_PAGE), 0);
+    // Invalid task
+    assert_eq!(
+        mmu::set_page_attr(3, 0x4010_0000, mmu::USER_CODE_PAGE),
+        mmu::PAGE_ATTR_ERR_INVALID_TASK
+    );
+    // Out of range: below L3 base
+    assert_eq!(
+        mmu::set_page_attr(0, 0x3000_0000, mmu::USER_CODE_PAGE),
+        mmu::PAGE_ATTR_ERR_OUT_OF_RANGE
+    );
+    // Out of range: above L3 range (0x4020_0000)
+    assert_eq!(
+        mmu::set_page_attr(0, 0x4020_0000, mmu::USER_CODE_PAGE),
+        mmu::PAGE_ATTR_ERR_OUT_OF_RANGE
+    );
 }

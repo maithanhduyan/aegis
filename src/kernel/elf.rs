@@ -231,3 +231,113 @@ pub fn parse_elf64(data: &[u8]) -> Result<ElfInfo, ElfError> {
         num_segments,
     })
 }
+
+// ─── ELF Loader (Phase L4) ─────────────────────────────────────────
+
+/// ELF load error (returned by loader functions).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ElfLoadError {
+    /// Segment vaddr is below the load region or entry outside region
+    VaddrOutOfRange,
+    /// Segment memsz extends past the end of the load region
+    SegmentTooLarge,
+    /// Segment has both Write and Execute flags (W^X violation)
+    WxViolation,
+    /// No loadable segments found in ELF
+    NoSegments,
+}
+
+/// Validate that an ElfInfo can be loaded into [load_base, load_base + load_size).
+///
+/// Checks:
+///   1. At least one segment present
+///   2. No segment has both PF_W and PF_X (W^X enforcement)
+///   3. All segment vaddrs within the load region
+///   4. Entry point within the load region
+pub fn validate_elf_for_load(
+    info: &ElfInfo,
+    load_base: u64,
+    load_size: u64,
+) -> Result<(), ElfLoadError> {
+    if info.num_segments == 0 {
+        return Err(ElfLoadError::NoSegments);
+    }
+
+    let load_end = load_base + load_size;
+
+    for i in 0..info.num_segments {
+        if let Some(seg) = info.segments[i] {
+            // W^X check: never allow both Write and Execute
+            if (seg.flags & PF_W != 0) && (seg.flags & PF_X != 0) {
+                return Err(ElfLoadError::WxViolation);
+            }
+            // Vaddr must be within load region
+            if seg.vaddr < load_base {
+                return Err(ElfLoadError::VaddrOutOfRange);
+            }
+            // Segment end must not exceed load region
+            let seg_end = seg.vaddr.checked_add(seg.memsz)
+                .ok_or(ElfLoadError::SegmentTooLarge)?;
+            if seg_end > load_end {
+                return Err(ElfLoadError::SegmentTooLarge);
+            }
+        }
+    }
+
+    // Entry point must be within the load region
+    if info.entry < load_base || info.entry >= load_end {
+        return Err(ElfLoadError::VaddrOutOfRange);
+    }
+
+    Ok(())
+}
+
+/// Load ELF segments into memory.
+///
+/// Copies each segment's `filesz` bytes from ELF data to the destination
+/// buffer, then zeros the BSS portion (`memsz - filesz`). Validates the
+/// load configuration before copying.
+///
+/// # Parameters
+/// - `elf_data`: raw ELF binary (source for segment data)
+/// - `info`: parsed ELF info from `parse_elf64`
+/// - `dest`: pointer to writable memory at `dest_vaddr`
+/// - `dest_vaddr`: virtual address corresponding to `dest` (for offset calculation)
+/// - `dest_size`: available bytes at `dest`
+///
+/// # Returns
+/// Entry point address on success.
+///
+/// # Safety
+/// `dest` must point to at least `dest_size` bytes of writable memory.
+pub unsafe fn load_elf_segments(
+    elf_data: &[u8],
+    info: &ElfInfo,
+    dest: *mut u8,
+    dest_vaddr: u64,
+    dest_size: usize,
+) -> Result<u64, ElfLoadError> {
+    // Validate before touching memory
+    validate_elf_for_load(info, dest_vaddr, dest_size as u64)?;
+
+    for i in 0..info.num_segments {
+        if let Some(seg) = info.segments[i] {
+            let offset_in_dest = (seg.vaddr - dest_vaddr) as usize;
+
+            // Copy filesz bytes from ELF data → destination
+            if seg.filesz > 0 {
+                let src = elf_data.as_ptr().add(seg.offset as usize);
+                let dst = dest.add(offset_in_dest);
+                core::ptr::copy_nonoverlapping(src, dst, seg.filesz as usize);
+            }
+
+            // Zero BSS (memsz - filesz)
+            if seg.memsz > seg.filesz {
+                let bss_start = dest.add(offset_in_dest + seg.filesz as usize);
+                core::ptr::write_bytes(bss_start, 0, (seg.memsz - seg.filesz) as usize);
+            }
+        }
+    }
+
+    Ok(info.entry)
+}
