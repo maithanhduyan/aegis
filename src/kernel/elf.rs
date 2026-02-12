@@ -320,21 +320,25 @@ pub unsafe fn load_elf_segments(
     // Validate before touching memory
     validate_elf_for_load(info, dest_vaddr, dest_size as u64)?;
 
-    for i in 0..info.num_segments {
-        if let Some(seg) = info.segments[i] {
-            let offset_in_dest = (seg.vaddr - dest_vaddr) as usize;
+    // SAFETY: caller guarantees dest points to dest_size bytes of writable memory;
+    // validate_elf_for_load ensures all segments fit within that region
+    unsafe {
+        for i in 0..info.num_segments {
+            if let Some(seg) = info.segments[i] {
+                let offset_in_dest = (seg.vaddr - dest_vaddr) as usize;
 
-            // Copy filesz bytes from ELF data → destination
-            if seg.filesz > 0 {
-                let src = elf_data.as_ptr().add(seg.offset as usize);
-                let dst = dest.add(offset_in_dest);
-                core::ptr::copy_nonoverlapping(src, dst, seg.filesz as usize);
-            }
+                // Copy filesz bytes from ELF data → destination
+                if seg.filesz > 0 {
+                    let src = elf_data.as_ptr().add(seg.offset as usize);
+                    let dst = dest.add(offset_in_dest);
+                    core::ptr::copy_nonoverlapping(src, dst, seg.filesz as usize);
+                }
 
-            // Zero BSS (memsz - filesz)
-            if seg.memsz > seg.filesz {
-                let bss_start = dest.add(offset_in_dest + seg.filesz as usize);
-                core::ptr::write_bytes(bss_start, 0, (seg.memsz - seg.filesz) as usize);
+                // Zero BSS (memsz - filesz)
+                if seg.memsz > seg.filesz {
+                    let bss_start = dest.add(offset_in_dest + seg.filesz as usize);
+                    core::ptr::write_bytes(bss_start, 0, (seg.memsz - seg.filesz) as usize);
+                }
             }
         }
     }

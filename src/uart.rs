@@ -35,3 +35,25 @@ pub fn uart_print_hex(val: u64) {
         uart_write(hex[nibble]);
     }
 }
+
+/// Print a u64 value as decimal to UART (no heap allocation)
+pub fn uart_print_dec(val: u64) {
+    if val == 0 {
+        uart_write(b'0');
+        return;
+    }
+    // Max u64 is 20 digits
+    let mut buf = [0u8; 20];
+    let mut pos = 0;
+    let mut v = val;
+    while v > 0 {
+        buf[pos] = b'0' + (v % 10) as u8;
+        v /= 10;
+        pos += 1;
+    }
+    // Print in reverse (most significant first)
+    while pos > 0 {
+        pos -= 1;
+        uart_write(buf[pos]);
+    }
+}

@@ -7,6 +7,7 @@
 //! On host (x86_64): only pure logic available (types, constants, validation).
 
 #![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 // ─── Phase L module structure ──────────────────────────────────────
 
@@ -55,4 +56,4 @@ pub use kernel::elf;
 pub use arch::current::gic;
 
 // Re-export common UART functions at crate root for convenience
-pub use uart::{uart_write, uart_print, uart_print_hex};
+pub use uart::{uart_write, uart_print, uart_print_hex, uart_print_dec};

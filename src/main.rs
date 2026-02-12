@@ -8,6 +8,7 @@
 
 // On host (x86_64): empty bin that does nothing (tests use --lib --test)
 #![cfg_attr(not(target_arch = "aarch64"), allow(unused))]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg(target_arch = "aarch64")]
 use core::panic::PanicInfo;
@@ -534,15 +535,53 @@ pub extern "C" fn kernel_main() -> ! {
     }
     timer::init(10);
 
+    uart_print("[AegisOS] enhanced panic handler ready\n");
     uart_print("[AegisOS] bootstrapping into uart_driver (EL0)...\n");
     sched::bootstrap();
 }
 
 #[cfg(target_arch = "aarch64")]
 #[panic_handler]
-fn panic(_: &PanicInfo) -> ! {
-    uart_print("PANIC\n");
-    loop {}
+fn panic(info: &PanicInfo) -> ! {
+    uart_print("\n!!! KERNEL PANIC !!!\n");
+
+    // Tick count
+    uart_print("  tick: 0x");
+    aegis_os::uart_print_hex(timer::tick_count());
+    uart_print("\n");
+
+    // Current task
+    uart_print("  task: ");
+    aegis_os::uart_print_dec(sched::current_task_id() as u64);
+    uart_print("\n");
+
+    // Source location (file:line) if available
+    if let Some(loc) = info.location() {
+        uart_print("  at: ");
+        uart_print(loc.file());
+        uart_print(":");
+        aegis_os::uart_print_dec(loc.line() as u64);
+        uart_print("\n");
+    }
+
+    // ESR_EL1 and FAR_EL1 — capture exception syndrome for diagnostics
+    let esr: u64;
+    let far: u64;
+    // SAFETY: reading system registers is a read-only operation at EL1
+    unsafe {
+        core::arch::asm!("mrs {}, ESR_EL1", out(reg) esr, options(nomem, nostack));
+        core::arch::asm!("mrs {}, FAR_EL1", out(reg) far, options(nomem, nostack));
+    }
+    uart_print("  ESR_EL1: 0x");
+    aegis_os::uart_print_hex(esr);
+    uart_print("\n  FAR_EL1: 0x");
+    aegis_os::uart_print_hex(far);
+    uart_print("\n");
+
+    loop {
+        // SAFETY: wfe is a hint instruction, safe at EL1
+        unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };
+    }
 }
 
 // On host target: provide a main() so the bin target compiles

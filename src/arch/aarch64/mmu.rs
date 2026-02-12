@@ -206,7 +206,8 @@ fn table_ptr(index: usize) -> *mut u64 {
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn write_entry(table: *mut u64, index: usize, value: u64) {
-    ptr::write_volatile(table.add(index), value);
+    // SAFETY: caller guarantees table + index points to a valid page table slot
+    unsafe { ptr::write_volatile(table.add(index), value) };
 }
 
 // ─── Phase H: Per-task page tables ─────────────────────────────────
@@ -217,10 +218,13 @@ unsafe fn write_entry(table: *mut u64, index: usize, value: u64) {
 /// map_device_for_task() later upgrades specific entries to DEVICE_BLOCK_EL0.
 #[cfg(target_arch = "aarch64")]
 unsafe fn build_l2_device(l2dev_index: usize) {
-    let l2_device = table_ptr(l2dev_index);
-    for i in 64..=72 {
-        let pa = (i as u64) * 0x20_0000;
-        write_entry(l2_device, i, pa | DEVICE_BLOCK);
+    // SAFETY: accesses page table memory via table_ptr and write_entry
+    unsafe {
+        let l2_device = table_ptr(l2dev_index);
+        for i in 64..=72 {
+            let pa = (i as u64) * 0x20_0000;
+            write_entry(l2_device, i, pa | DEVICE_BLOCK);
+        }
     }
 }
 
@@ -229,6 +233,8 @@ unsafe fn build_l2_device(l2dev_index: usize) {
 /// `owner_task` = which task (0,1,2) owns this table. 0xFF = kernel boot (all stacks EL1-only).
 #[cfg(target_arch = "aarch64")]
 unsafe fn build_l3(l3_index: usize, owner_task: u8) {
+    // SAFETY: accesses extern linker statics, page table memory, and write_entry
+    unsafe {
     let l3 = table_ptr(l3_index);
 
     let text_start = sym_addr(&__text_start);
@@ -280,22 +286,26 @@ unsafe fn build_l3(l3_index: usize, owner_task: u8) {
 
         write_entry(l3, i, desc);
     }
+    } // unsafe
 }
 
 /// Build an L2_ram table that points to a specific L3 table.
 /// `l2_index` = page index for this L2_ram, `l3_index` = page index for its L3.
 #[cfg(target_arch = "aarch64")]
 unsafe fn build_l2_ram(l2_index: usize, l3_index: usize) {
-    let l2_ram = table_ptr(l2_index);
-    let l3 = table_ptr(l3_index);
+    // SAFETY: accesses page table memory via table_ptr and write_entry
+    unsafe {
+        let l2_ram = table_ptr(l2_index);
+        let l3 = table_ptr(l3_index);
 
-    // Entry [0] → L3 table (first 2MiB, fine-grained)
-    write_entry(l2_ram, 0, (l3 as u64) | TABLE);
+        // Entry [0] → L3 table (first 2MiB, fine-grained)
+        write_entry(l2_ram, 0, (l3 as u64) | TABLE);
 
-    // Entries [1..63] → 2MiB RAM blocks (EL1-only, same as before)
-    for i in 1..64 {
-        let pa = 0x4000_0000_u64 + (i as u64) * 0x20_0000;
-        write_entry(l2_ram, i, pa | RAM_BLOCK);
+        // Entries [1..63] → 2MiB RAM blocks (EL1-only, same as before)
+        for i in 1..64 {
+            let pa = 0x4000_0000_u64 + (i as u64) * 0x20_0000;
+            write_entry(l2_ram, i, pa | RAM_BLOCK);
+        }
     }
 }
 
@@ -304,12 +314,15 @@ unsafe fn build_l2_ram(l2_index: usize, l3_index: usize) {
 /// `l2_device_index` = page index for this task's L2_device table.
 #[cfg(target_arch = "aarch64")]
 unsafe fn build_l1(l1_index: usize, l2_ram_index: usize, l2_device_index: usize) {
-    let l1 = table_ptr(l1_index);
-    let l2_device = table_ptr(l2_device_index);
-    let l2_ram = table_ptr(l2_ram_index);
+    // SAFETY: accesses page table memory via table_ptr and write_entry
+    unsafe {
+        let l1 = table_ptr(l1_index);
+        let l2_device = table_ptr(l2_device_index);
+        let l2_ram = table_ptr(l2_ram_index);
 
-    write_entry(l1, 0, (l2_device as u64) | TABLE);
-    write_entry(l1, 1, (l2_ram as u64) | TABLE);
+        write_entry(l1, 0, (l2_device as u64) | TABLE);
+        write_entry(l1, 1, (l2_ram as u64) | TABLE);
+    }
 }
 
 /// Get physical address of L1 page table for a task.
@@ -341,6 +354,8 @@ pub fn ttbr0_for_task(task_id: usize, asid: u16) -> u64 {
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_init() {
+    // SAFETY: builds all page tables using pre-allocated static memory, flushes with asm
+    unsafe {
     // Per-task L2_device tables (pages 0, 1, 2) — all devices EL1-only initially
     for task in 0..3_usize {
         build_l2_device(PT_L2_DEVICE_0 + task);
@@ -367,6 +382,7 @@ pub unsafe extern "C" fn mmu_init() {
         "isb",
         options(nomem, nostack)
     );
+    } // unsafe
 }
 
 // ─── Phase J3: Device MMIO mapping ─────────────────────────────────
@@ -400,6 +416,8 @@ pub const DEVICE_MAP_ERR_INVALID_TASK: u64 = 0xFFFF_2002;
 /// Safety: device_id must index into DEVICES. GIC is never exposed.
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
+    // SAFETY: accesses page table memory, performs TLB invalidation via asm
+    unsafe {
     let did = device_id as usize;
     if did >= DEVICES.len() {
         crate::uart_print("!!! DEVICE MAP: invalid device_id\n");
@@ -434,6 +452,7 @@ pub unsafe fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
     crate::uart_print("\n");
 
     0 // success
+    } // unsafe
 }
 
 /// Host-test stub for map_device_for_task
@@ -455,6 +474,8 @@ pub fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
 /// Must be followed by TLB invalidation for the task's ASID.
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn map_grant_for_task(grant_phys: u64, task_id: usize) {
+    // SAFETY: accesses page table memory, performs TLB invalidation via asm
+    unsafe {
     let l3 = table_ptr(PT_L3_TASK0 + task_id);
     let base: u64 = 0x4000_0000;
     let index = ((grant_phys - base) / 4096) as usize;
@@ -470,12 +491,15 @@ pub unsafe fn map_grant_for_task(grant_phys: u64, task_id: usize) {
             options(nomem, nostack)
         );
     }
+    } // unsafe
 }
 
 /// Unmap a grant page from a task's L3 table (revert to AP_RW_EL1, EL0 no access).
 /// Must be followed by TLB invalidation for the task's ASID.
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn unmap_grant_for_task(grant_phys: u64, task_id: usize) {
+    // SAFETY: accesses page table memory, performs TLB invalidation via asm
+    unsafe {
     let l3 = table_ptr(PT_L3_TASK0 + task_id);
     let base: u64 = 0x4000_0000;
     let index = ((grant_phys - base) / 4096) as usize;
@@ -491,6 +515,7 @@ pub unsafe fn unmap_grant_for_task(grant_phys: u64, task_id: usize) {
             options(nomem, nostack)
         );
     }
+    } // unsafe
 }
 
 /// Enable MMU — called from assembly after mmu_init()
@@ -499,12 +524,15 @@ pub unsafe fn unmap_grant_for_task(grant_phys: u64, task_id: usize) {
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_get_config(out: *mut [u64; 4]) {
-    // Kernel boot L1 (page 13) — no EL0 user stack access
-    let l1_kernel = table_ptr(PT_L1_KERNEL);
-    (*out)[0] = MAIR_VALUE;
-    (*out)[1] = TCR_VALUE;
-    (*out)[2] = l1_kernel as u64; // TTBR0 = kernel boot table
-    (*out)[3] = SCTLR_MMU_ON | SCTLR_WXN;
+    // SAFETY: dereferences raw pointer out, accesses page table memory
+    unsafe {
+        // Kernel boot L1 (page 13) — no EL0 user stack access
+        let l1_kernel = table_ptr(PT_L1_KERNEL);
+        (*out)[0] = MAIR_VALUE;
+        (*out)[1] = TCR_VALUE;
+        (*out)[2] = l1_kernel as u64; // TTBR0 = kernel boot table
+        (*out)[3] = SCTLR_MMU_ON | SCTLR_WXN;
+    }
 }
 
 // ─── Phase L4: Page attribute manipulation ─────────────────────────
@@ -523,6 +551,8 @@ pub const PAGE_ATTR_ERR_OUT_OF_RANGE: u64 = 0xFFFF_3002;
 /// Caller must ensure `task_id < NUM_TASKS` and `vaddr` is page-aligned.
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn set_page_attr(task_id: usize, vaddr: u64, template: u64) -> u64 {
+    // SAFETY: accesses page table memory, performs TLB invalidation via asm
+    unsafe {
     if task_id >= 3 {
         return PAGE_ATTR_ERR_INVALID_TASK;
     }
@@ -544,6 +574,7 @@ pub unsafe fn set_page_attr(task_id: usize, vaddr: u64, template: u64) -> u64 {
         options(nomem, nostack)
     );
     0 // success
+    } // unsafe
 }
 
 /// Host-test stub for set_page_attr
