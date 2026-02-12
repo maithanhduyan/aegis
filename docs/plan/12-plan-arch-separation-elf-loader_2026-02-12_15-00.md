@@ -1,6 +1,6 @@
 # Kế hoạch Phase L — Tách Arch + ELF Loader
 
-> **Trạng thái: 📋 DRAFT** — Tái cấu trúc codebase thành `arch/aarch64/` + `kernel/` + `platform/` để tách biệt code phụ thuộc kiến trúc khỏi logic portable, sau đó xây dựng ELF64 parser + loader để load task từ binary thay vì hardcode trong kernel. Đây là bước nền tảng để AegisOS hướng tới portability (RISC-V tương lai) và modularity (yêu cầu DO-178C/IEC 62304).
+> **Trạng thái: � IN PROGRESS (L1 ✅ L2 ✅ L3 ✅)** — Tái cấu trúc codebase thành `arch/aarch64/` + `kernel/` + `platform/` để tách biệt code phụ thuộc kiến trúc khỏi logic portable, sau đó xây dựng ELF64 parser + loader để load task từ binary thay vì hardcode trong kernel. Đây là bước nền tảng để AegisOS hướng tới portability (RISC-V tương lai) và modularity (yêu cầu DO-178C/IEC 62304).
 
 ---
 
@@ -942,10 +942,10 @@ Bit 19–63:  Reserved (45–46 bits còn trống)
 
 ## Bước tiếp theo đề xuất
 
-1. [ ] **Review kế hoạch** → phản hồi/chỉnh sửa (đặc biệt L2 scope và L4 syscall quyết định)
-2. [ ] **Triển khai L1** (Module Structure) — rủi ro thấp, di chuyển file nguyên vẹn (handoff → Aegis-Agent)
-3. [ ] **Triển khai L2** (Tách Arch Code) — rủi ro cao, cần chia nhỏ 6–8 bước (handoff → Aegis-Agent)
-4. [ ] **Triển khai L3** (ELF Parser) — có thể song song với L2 (handoff → Aegis-Agent)
+1. [x] **Review kế hoạch** → phản hồi/chỉnh sửa (đặc biệt L2 scope và L4 syscall quyết định)
+2. [x] **Triển khai L1** (Module Structure) — ✅ 162 tests + 19 QEMU checkpoints
+3. [x] **Triển khai L2** (Tách Arch Code) — ✅ 162 tests + 20 QEMU checkpoints
+4. [x] **Triển khai L3** (ELF Parser) — ✅ 174 tests + 21 QEMU checkpoints
 5. [ ] **Triển khai L4** (ELF Loader) — sau L2+L3 merge (handoff → Aegis-Agent)
 6. [ ] **Triển khai L5** (Demo Binary) — proof of concept (handoff → Aegis-Agent)
 7. [ ] **Triển khai L6** (Tests) — ~25 host tests + 3 QEMU checkpoints (handoff → Aegis-Agent)

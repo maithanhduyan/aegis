@@ -35,6 +35,7 @@ use aegis_os::cap::{
 };
 use aegis_os::grant::{self, EMPTY_GRANT, MAX_GRANTS};
 use aegis_os::irq::{self, EMPTY_BINDING, MAX_IRQ_BINDINGS};
+use aegis_os::elf::{self, ElfError, ElfSegment, ElfInfo, MAX_SEGMENTS, PF_R, PF_W, PF_X};
 
 // ─── Helper: read CURRENT safely (avoids static_mut_refs warning) ──
 
@@ -2112,4 +2113,215 @@ fn sched_heartbeat_reset_on_restart() {
         assert_eq!(sched::TCBS[1].last_heartbeat, RESTART_DELAY_TICKS,
             "last_heartbeat should be reset to current tick on restart");
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 16. ELF64 Parser Tests (Phase L3)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Build a minimal valid ELF64 AArch64 executable in a byte buffer.
+/// Returns a Vec<u8> with ELF header + `num_loads` PT_LOAD program headers.
+/// Each segment is a 0x1000-byte region at vaddr 0x4010_0000 + i*0x1000.
+fn build_test_elf(num_loads: usize) -> [u8; 512] {
+    let mut buf = [0u8; 512];
+
+    // ─── ELF Header (64 bytes) ─────────────────────────────────────
+    // Magic
+    buf[0] = 0x7F; buf[1] = b'E'; buf[2] = b'L'; buf[3] = b'F';
+    // Class = 64-bit
+    buf[4] = 2;
+    // Data = little-endian
+    buf[5] = 1;
+    // Version
+    buf[6] = 1;
+    // OS/ABI (0 = ELFOSABI_NONE)
+    buf[7] = 0;
+    // Padding [8..16] = 0
+
+    // e_type = ET_EXEC (2) at offset 16
+    buf[16] = 2; buf[17] = 0;
+    // e_machine = EM_AARCH64 (183 = 0xB7) at offset 18
+    buf[18] = 0xB7; buf[19] = 0;
+    // e_version at offset 20
+    buf[20] = 1; buf[21] = 0; buf[22] = 0; buf[23] = 0;
+
+    // e_entry = 0x4010_0000 at offset 24 (little-endian u64)
+    buf[24] = 0x00; buf[25] = 0x00; buf[26] = 0x10; buf[27] = 0x40;
+    buf[28] = 0; buf[29] = 0; buf[30] = 0; buf[31] = 0;
+
+    // e_phoff = 64 (program headers start right after ELF header) at offset 32
+    buf[32] = 64; buf[33] = 0; buf[34] = 0; buf[35] = 0;
+    buf[36] = 0; buf[37] = 0; buf[38] = 0; buf[39] = 0;
+
+    // e_shoff = 0 (no section headers) at offset 40
+    // e_flags = 0 at offset 48
+    // e_ehsize = 64 at offset 52
+    buf[52] = 64; buf[53] = 0;
+
+    // e_phentsize = 56 at offset 54
+    buf[54] = 56; buf[55] = 0;
+
+    // e_phnum at offset 56
+    buf[56] = num_loads as u8; buf[57] = 0;
+
+    // e_shentsize, e_shnum, e_shstrndx at offsets 58-63 = 0
+
+    // ─── Program Headers (56 bytes each) ───────────────────────────
+    for i in 0..num_loads {
+        let ph_base = 64 + i * 56;
+        if ph_base + 56 > buf.len() { break; }
+
+        // p_type = PT_LOAD (1) at ph_base+0
+        buf[ph_base] = 1; buf[ph_base + 1] = 0; buf[ph_base + 2] = 0; buf[ph_base + 3] = 0;
+
+        // p_flags = PF_R | PF_X (5) at ph_base+4
+        let flags: u32 = if i == 0 { 5 } else { 6 }; // 5=RX for .text, 6=RW for .data
+        buf[ph_base + 4] = flags as u8;
+        buf[ph_base + 5] = 0; buf[ph_base + 6] = 0; buf[ph_base + 7] = 0;
+
+        // p_offset = 0 at ph_base+8 (segment data starts at file offset 0 for simplicity)
+        // (points into the buffer itself — we just need bounds to be valid)
+
+        // p_vaddr at ph_base+16 = 0x4010_0000 + i * 0x1000
+        let vaddr: u64 = 0x4010_0000 + (i as u64) * 0x1000;
+        let vb = vaddr.to_le_bytes();
+        buf[ph_base + 16] = vb[0]; buf[ph_base + 17] = vb[1];
+        buf[ph_base + 18] = vb[2]; buf[ph_base + 19] = vb[3];
+        buf[ph_base + 20] = vb[4]; buf[ph_base + 21] = vb[5];
+        buf[ph_base + 22] = vb[6]; buf[ph_base + 23] = vb[7];
+
+        // p_paddr at ph_base+24 (same as vaddr for identity map)
+        buf[ph_base + 24] = vb[0]; buf[ph_base + 25] = vb[1];
+        buf[ph_base + 26] = vb[2]; buf[ph_base + 27] = vb[3];
+        buf[ph_base + 28] = vb[4]; buf[ph_base + 29] = vb[5];
+        buf[ph_base + 30] = vb[6]; buf[ph_base + 31] = vb[7];
+
+        // p_filesz = 64 at ph_base+32 (small, fits within our 512-byte buffer)
+        buf[ph_base + 32] = 64; buf[ph_base + 33] = 0;
+        buf[ph_base + 34] = 0; buf[ph_base + 35] = 0;
+        buf[ph_base + 36] = 0; buf[ph_base + 37] = 0;
+        buf[ph_base + 38] = 0; buf[ph_base + 39] = 0;
+
+        // p_memsz = 0x1000 at ph_base+40
+        buf[ph_base + 40] = 0x00; buf[ph_base + 41] = 0x10;
+        buf[ph_base + 42] = 0; buf[ph_base + 43] = 0;
+        buf[ph_base + 44] = 0; buf[ph_base + 45] = 0;
+        buf[ph_base + 46] = 0; buf[ph_base + 47] = 0;
+
+        // p_align at ph_base+48 = 0x1000
+        buf[ph_base + 48] = 0x00; buf[ph_base + 49] = 0x10;
+    }
+
+    buf
+}
+
+#[test]
+fn elf_parse_valid_single_segment() {
+    let elf = build_test_elf(1);
+    let info = elf::parse_elf64(&elf).expect("valid ELF should parse");
+    assert_eq!(info.entry, 0x4010_0000);
+    assert_eq!(info.num_segments, 1);
+    let seg = info.segments[0].unwrap();
+    assert_eq!(seg.vaddr, 0x4010_0000);
+    assert_eq!(seg.filesz, 64);
+    assert_eq!(seg.memsz, 0x1000);
+    assert_eq!(seg.flags & PF_R, PF_R);
+    assert_eq!(seg.flags & PF_X, PF_X);
+}
+
+#[test]
+fn elf_parse_valid_multiple_segments() {
+    let elf = build_test_elf(3);
+    let info = elf::parse_elf64(&elf).expect("valid ELF should parse");
+    assert_eq!(info.num_segments, 3);
+    for i in 0..3 {
+        let seg = info.segments[i].unwrap();
+        assert_eq!(seg.vaddr, 0x4010_0000 + (i as u64) * 0x1000);
+    }
+    assert!(info.segments[3].is_none());
+}
+
+#[test]
+fn elf_parse_too_small() {
+    let tiny = [0u8; 32]; // less than 64-byte ELF header
+    assert_eq!(elf::parse_elf64(&tiny).unwrap_err(), ElfError::TooSmall);
+}
+
+#[test]
+fn elf_parse_bad_magic() {
+    let mut elf = build_test_elf(1);
+    elf[0] = 0x00; // corrupt magic
+    assert_eq!(elf::parse_elf64(&elf).unwrap_err(), ElfError::BadMagic);
+}
+
+#[test]
+fn elf_parse_not_64bit() {
+    let mut elf = build_test_elf(1);
+    elf[4] = 1; // ELFCLASS32
+    assert_eq!(elf::parse_elf64(&elf).unwrap_err(), ElfError::Not64Bit);
+}
+
+#[test]
+fn elf_parse_not_little_endian() {
+    let mut elf = build_test_elf(1);
+    elf[5] = 2; // ELFDATA2MSB (big-endian)
+    assert_eq!(elf::parse_elf64(&elf).unwrap_err(), ElfError::NotLittleEndian);
+}
+
+#[test]
+fn elf_parse_not_executable() {
+    let mut elf = build_test_elf(1);
+    elf[16] = 3; // ET_DYN (shared library)
+    assert_eq!(elf::parse_elf64(&elf).unwrap_err(), ElfError::NotExecutable);
+}
+
+#[test]
+fn elf_parse_wrong_arch() {
+    let mut elf = build_test_elf(1);
+    elf[18] = 0x3E; elf[19] = 0; // EM_X86_64 = 62
+    assert_eq!(elf::parse_elf64(&elf).unwrap_err(), ElfError::WrongArch);
+}
+
+#[test]
+fn elf_parse_too_many_segments() {
+    // Build with 5 segments — but our buffer is 512 bytes, 64 header + 5*56 = 344, fits
+    // We need MAX_SEGMENTS = 4, so 5 should fail
+    let mut buf = [0u8; 512];
+    // Copy a valid header
+    let base = build_test_elf(5);
+    buf.copy_from_slice(&base);
+    // num_loads is already 5 from build_test_elf(5)
+    assert_eq!(elf::parse_elf64(&buf).unwrap_err(), ElfError::TooManySegments);
+}
+
+#[test]
+fn elf_parse_segment_out_of_bounds() {
+    let mut elf = build_test_elf(1);
+    // Set p_filesz to a huge value that exceeds file size
+    // p_filesz at offset 64 + 32 = 96
+    elf[96] = 0xFF; elf[97] = 0xFF; elf[98] = 0xFF; elf[99] = 0x7F;
+    assert_eq!(elf::parse_elf64(&elf).unwrap_err(), ElfError::SegmentOutOfBounds);
+}
+
+#[test]
+fn elf_parse_no_segments() {
+    let elf = build_test_elf(0);
+    let info = elf::parse_elf64(&elf).expect("ELF with 0 segments should parse");
+    assert_eq!(info.num_segments, 0);
+    assert_eq!(info.entry, 0x4010_0000);
+    for s in &info.segments {
+        assert!(s.is_none());
+    }
+}
+
+#[test]
+fn elf_parse_entry_point() {
+    let mut elf = build_test_elf(1);
+    // Change entry point to 0xDEAD_BEEF_CAFE_0000
+    let entry: u64 = 0xDEAD_BEEF_CAFE_0000;
+    let eb = entry.to_le_bytes();
+    elf[24] = eb[0]; elf[25] = eb[1]; elf[26] = eb[2]; elf[27] = eb[3];
+    elf[28] = eb[4]; elf[29] = eb[5]; elf[30] = eb[6]; elf[31] = eb[7];
+    let info = elf::parse_elf64(&elf).expect("should parse");
+    assert_eq!(info.entry, entry);
 }

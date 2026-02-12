@@ -453,6 +453,9 @@ pub extern "C" fn kernel_main() -> ! {
     uart_print("[AegisOS] arch separation: module tree ready\n");
     uart_print("[AegisOS] arch separation: complete\n");
 
+    // ─── Phase L3: ELF64 Parser ────────────────────────────────────
+    uart_print("[AegisOS] ELF64 parser ready\n");
+
     timer::init(10);
 
     uart_print("[AegisOS] bootstrapping into uart_driver (EL0)...\n");
