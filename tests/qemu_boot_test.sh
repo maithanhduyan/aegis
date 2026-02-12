@@ -24,10 +24,14 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# NOTE: Uses bash built-in pattern matching instead of echo|grep pipe.
+# The old `echo "$OUTPUT" | grep -qF` approach caused SIGPIPE (broken pipe)
+# when OUTPUT was large and grep -q exited early, combined with `set -o pipefail`
+# this made the pipeline return non-zero even on successful matches.
 check() {
     local label="$1"
     local pattern="$2"
-    if echo "$OUTPUT" | grep -qF "$pattern"; then
+    if [[ "$OUTPUT" == *"$pattern"* ]]; then
         echo -e "  ${GREEN}✓${NC} $label"
         PASS=$((PASS + 1))
     else

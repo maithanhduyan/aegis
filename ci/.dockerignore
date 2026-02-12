@@ -1,0 +1,9 @@
+# Docker ignore — keep CI image small
+target/
+node_modules/
+*.o
+*.d
+*.elf
+*.bin
+.git/
+docs/

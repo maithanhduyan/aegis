@@ -12,6 +12,7 @@ on:
     branches: [main, develop]
     paths:
       - "src/**"
+      - "user/**"
       - "tests/**"
       - "Cargo.toml"
       - "Cargo.lock"
