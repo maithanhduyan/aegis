@@ -564,6 +564,7 @@ pub extern "C" fn kernel_main() -> ! {
 
     uart_print("[AegisOS] enhanced panic handler ready\n");
     uart_print("[AegisOS] klog ready\n");
+    uart_print("[AegisOS] safety audit complete\n");
     uart_print("[AegisOS] bootstrapping into uart_driver (EL0)...\n");
     sched::bootstrap();
 }

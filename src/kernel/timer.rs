@@ -4,10 +4,9 @@
 /// Uses the EL1 Physical Timer (CNTP) with PPI INTID 30.
 /// QEMU virt timer frequency: 62,500,000 Hz (62.5 MHz).
 
+use crate::kernel::cell::KernelCell;
 #[cfg(target_arch = "aarch64")]
 use crate::uart_print;
-#[cfg(target_arch = "aarch64")]
-use crate::kernel::cell::KernelCell;
 
 /// GIC INTID for EL1 Physical Timer (PPI 14)
 pub const TIMER_INTID: u32 = 30;
@@ -17,8 +16,9 @@ pub const TIMER_INTID: u32 = 30;
 #[cfg(target_arch = "aarch64")]
 static TICK_INTERVAL: KernelCell<u64> = KernelCell::new(0);
 
-/// Monotonic tick counter
-pub static mut TICK_COUNT: u64 = 0;
+/// Monotonic tick counter.
+/// Encapsulated in KernelCell (Phase M1) — access via unsafe get()/get_mut().
+pub static TICK_COUNT: KernelCell<u64> = KernelCell::new(0);
 
 /// Initialize timer for periodic ticks
 /// `tick_ms` = interval in milliseconds (e.g., 10 for 10ms)
@@ -82,7 +82,7 @@ pub fn rearm() {
 #[cfg(target_arch = "aarch64")]
 pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-    unsafe { TICK_COUNT += 1; }
+    unsafe { *TICK_COUNT.get_mut() += 1; }
 
     // Re-arm for next tick
     rearm();
@@ -90,7 +90,7 @@ pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
     // Phase K: Track budget for current running task
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
-        let current = crate::sched::CURRENT;
+        let current = *crate::sched::CURRENT.get();
         crate::sched::TCBS[current].ticks_used += 1;
 
         // Phase K: Epoch management — reset budgets every EPOCH_LENGTH ticks
@@ -100,7 +100,7 @@ pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
         }
 
         // Phase K: Watchdog scan at regular intervals
-        if TICK_COUNT % crate::sched::WATCHDOG_SCAN_PERIOD == 0 {
+        if *TICK_COUNT.get() % crate::sched::WATCHDOG_SCAN_PERIOD == 0 {
             crate::sched::watchdog_scan();
         }
     }
@@ -113,7 +113,7 @@ pub fn tick_handler(frame: &mut crate::exception::TrapFrame) {
 #[allow(dead_code)]
 pub fn tick_count() -> u64 {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-    unsafe { TICK_COUNT }
+    unsafe { *TICK_COUNT.get() }
 }
 
 /// Simple decimal printer for small numbers

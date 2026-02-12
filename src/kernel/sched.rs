@@ -61,7 +61,10 @@ pub const NUM_TASKS: usize = 3;
 use crate::kernel::cell::KernelCell;
 
 pub static mut TCBS: [Tcb; NUM_TASKS] = [EMPTY_TCB; NUM_TASKS];
-pub static mut CURRENT: usize = 0;
+
+/// Index of currently running task.
+/// Encapsulated in KernelCell (Phase M1) — access via unsafe get()/get_mut().
+pub static CURRENT: KernelCell<usize> = KernelCell::new(0);
 
 /// Delay before auto-restarting a faulted task (100 ticks × 10ms = 1 second)
 pub const RESTART_DELAY_TICKS: u64 = 100;
@@ -176,7 +179,7 @@ pub fn schedule(frame: &mut TrapFrame) {
     // ptr::copy_nonoverlapping: src and dst are valid pointers to non-overlapping TrapFrame-sized memory within static TCBS array.
     // Inline asm (msr ttbr0_el1): switches address space to new task's page table. Called at EL1.
     unsafe {
-        let old = CURRENT;
+        let old = *CURRENT.get();
 
         // Save current task's context from the TrapFrame
         core::ptr::copy_nonoverlapping(
@@ -231,7 +234,7 @@ pub fn schedule(frame: &mut TrapFrame) {
 
         // Switch to new task
         TCBS[next].state = TaskState::Running;
-        CURRENT = next;
+        *CURRENT.get_mut() = next;
 
         // Load new task's context into the frame.
         core::ptr::copy_nonoverlapping(
@@ -257,7 +260,7 @@ pub fn schedule(frame: &mut TrapFrame) {
 /// Get current task ID
 pub fn current_task_id() -> u16 {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
-    unsafe { TCBS[CURRENT].id }
+    unsafe { TCBS[*CURRENT.get()].id }
 }
 
 /// Set task state (used by IPC to block/unblock tasks)
@@ -309,7 +312,7 @@ pub fn load_frame(task_idx: usize, frame: &mut TrapFrame) {
 pub fn fault_current_task(frame: &mut TrapFrame) {
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
-        let current = CURRENT;
+        let current = *CURRENT.get();
         let id = TCBS[current].id;
 
         uart_print("[AegisOS] TASK ");
@@ -491,7 +494,7 @@ pub fn bootstrap() -> ! {
     // Inline asm: sets TTBR0_EL1, ELR_EL1, SPSR_EL1, SP_EL0 and erets into EL0 user task. Called at EL1.
     unsafe {
         TCBS[0].state = TaskState::Running;
-        CURRENT = 0;
+        *CURRENT.get_mut() = 0;
 
         let frame = &TCBS[0].context;
         let ttbr0 = TCBS[0].ttbr0;

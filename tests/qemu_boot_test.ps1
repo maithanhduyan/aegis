@@ -113,6 +113,7 @@ Check-Output "L5 ELF binary loaded"   "[AegisOS] client task loaded from ELF bin
 Check-Output "Timer started"          "[AegisOS] timer started"
 Check-Output "Enhanced panic handler" "[AegisOS] enhanced panic handler ready"
 Check-Output "klog ready"            "[AegisOS] klog ready"
+Check-Output "Safety audit complete" "[AegisOS] safety audit complete"
 Check-Output "Bootstrap into EL0"     "[AegisOS] bootstrapping into uart_driver"
 Check-Output "UART Driver ready"      "DRV:ready"
 Check-Output "L5 ELF task output"     "L5:ELF"

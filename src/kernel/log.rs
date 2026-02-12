@@ -64,7 +64,7 @@ pub fn log_prefix(level: LogLevel) {
     // [TN] — task index (0, 1, 2)
     uart_print("[T");
     // SAFETY: Single-core kernel, reading CURRENT index for log metadata.
-    let task = unsafe { crate::kernel::sched::CURRENT };
+    let task = unsafe { *crate::kernel::sched::CURRENT.get() };
     uart_write(b'0' + task as u8);
     uart_print("] ");
 

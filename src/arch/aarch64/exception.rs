@@ -369,12 +369,12 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
     // ─── Phase G: Capability check ─────────────────────────────────
     let required = crate::cap::cap_for_syscall(syscall_nr, ep_id);
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
-    let task_caps = unsafe { crate::sched::TCBS[crate::sched::CURRENT].caps };
+    let task_caps = unsafe { crate::sched::TCBS[*crate::sched::CURRENT.get()].caps };
 
     if !crate::cap::cap_check(task_caps, required) {
         uart_print("!!! CAP DENIED: task ");
         // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
-        uart_print_hex(unsafe { crate::sched::CURRENT } as u64);
+        uart_print_hex(unsafe { *crate::sched::CURRENT.get() } as u64);
         uart_print(" syscall #");
         uart_print_hex(syscall_nr);
         uart_print(" needs ");
@@ -489,7 +489,7 @@ fn handle_notify(frame: &mut TrapFrame) {
 fn handle_wait_notify(frame: &mut TrapFrame) {
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
     unsafe {
-        let current = crate::sched::CURRENT;
+        let current = *crate::sched::CURRENT.get();
 
         let pending = crate::sched::TCBS[current].notify_pending;
         if pending != 0 {
@@ -514,7 +514,7 @@ fn handle_grant_create(frame: &mut TrapFrame) {
     let grant_id = frame.x[0] as usize;
     let peer_id = frame.x[6] as usize;
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
-    let current = unsafe { crate::sched::CURRENT };
+    let current = unsafe { *crate::sched::CURRENT.get() };
 
     let result = crate::grant::grant_create(grant_id, current, peer_id);
     frame.x[0] = result;
@@ -527,7 +527,7 @@ fn handle_grant_create(frame: &mut TrapFrame) {
 fn handle_grant_revoke(frame: &mut TrapFrame) {
     let grant_id = frame.x[0] as usize;
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
-    let current = unsafe { crate::sched::CURRENT };
+    let current = unsafe { *crate::sched::CURRENT.get() };
 
     let result = crate::grant::grant_revoke(grant_id, current);
     frame.x[0] = result;
@@ -541,7 +541,7 @@ fn handle_irq_bind(frame: &mut TrapFrame) {
     let intid = frame.x[0] as u32;
     let notify_bit = frame.x[1];
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
-    let current = unsafe { crate::sched::CURRENT };
+    let current = unsafe { *crate::sched::CURRENT.get() };
     let result = crate::irq::irq_bind(intid, current, notify_bit);
     frame.x[0] = result;
 }
@@ -553,7 +553,7 @@ fn handle_irq_bind(frame: &mut TrapFrame) {
 fn handle_irq_ack(frame: &mut TrapFrame) {
     let intid = frame.x[0] as u32;
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
-    let current = unsafe { crate::sched::CURRENT };
+    let current = unsafe { *crate::sched::CURRENT.get() };
     let result = crate::irq::irq_ack(intid, current);
     frame.x[0] = result;
 }
@@ -565,7 +565,7 @@ fn handle_irq_ack(frame: &mut TrapFrame) {
 fn handle_device_map(frame: &mut TrapFrame) {
     let device_id = frame.x[0];
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
-    let current = unsafe { crate::sched::CURRENT };
+    let current = unsafe { *crate::sched::CURRENT.get() };
     // SAFETY: Called at EL1, device_id validated by match arm.
     let result = unsafe { crate::mmu::map_device_for_task(device_id, current) };
     frame.x[0] = result;
@@ -578,7 +578,7 @@ fn handle_device_map(frame: &mut TrapFrame) {
 fn handle_heartbeat(frame: &mut TrapFrame) {
     let interval = frame.x[0];
     // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
-    let current = unsafe { crate::sched::CURRENT };
+    let current = unsafe { *crate::sched::CURRENT.get() };
     crate::sched::record_heartbeat(current, interval);
     frame.x[0] = 0; // success
 }

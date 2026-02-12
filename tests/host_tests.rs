@@ -40,7 +40,7 @@ use aegis_os::elf::{self, ElfError, ElfLoadError, ElfSegment, ElfInfo, MAX_SEGME
 // ─── Helper: read CURRENT safely (avoids static_mut_refs warning) ──
 
 unsafe fn read_current() -> usize {
-    core::ptr::addr_of!(sched::CURRENT).read_volatile()
+    *sched::CURRENT.get()
 }
 
 // ─── Helper: reset all global state between tests ──────────────────
@@ -60,7 +60,7 @@ unsafe fn reset_test_state() {
         sched::TCBS[i].notify_pending = 0;
         sched::TCBS[i].notify_waiting = false;
     }
-    sched::CURRENT = 0;
+    *sched::CURRENT.get_mut() = 0;
     sched::TCBS[0].state = TaskState::Running;
 
     // Reset IPC endpoints
@@ -69,7 +69,7 @@ unsafe fn reset_test_state() {
     }
 
     // Reset tick counter
-    aegis_os::timer::TICK_COUNT = 0;
+    *aegis_os::timer::TICK_COUNT.get_mut() = 0;
 
     // Reset grant table
     for i in 0..MAX_GRANTS {
@@ -499,7 +499,7 @@ fn sched_auto_restart_after_delay() {
         sched::TCBS[1].user_stack_top = 0x5000_2000;
 
         // Set tick to just before restart threshold
-        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS - 1;
+        *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS - 1;
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
         };
@@ -508,7 +508,7 @@ fn sched_auto_restart_after_delay() {
         assert_eq!(sched::TCBS[1].state, TaskState::Faulted);
 
         // Set tick to exactly restart threshold
-        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS;
+        *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
         sched::schedule(&mut frame);
         // Task 1 should now be Ready (restarted)
         assert_eq!(sched::TCBS[1].state, TaskState::Ready);
@@ -528,7 +528,7 @@ fn sched_idle_fallback() {
         sched::TCBS[1].state = TaskState::Faulted;
         sched::TCBS[1].fault_tick = 0;
         sched::TCBS[2].state = TaskState::Running;
-        sched::CURRENT = 2;
+        *sched::CURRENT.get_mut() = 2;
 
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
@@ -1118,7 +1118,7 @@ fn notify_cleared_on_restart() {
         sched::TCBS[1].state = TaskState::Faulted;
         sched::TCBS[1].fault_tick = 0;
 
-        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS;
+        *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
         };
@@ -1877,7 +1877,7 @@ fn sched_empty_tcb_phase_k_fields_zeroed() {
 fn sched_record_heartbeat() {
     unsafe {
         reset_test_state();
-        aegis_os::timer::TICK_COUNT = 42;
+        *aegis_os::timer::TICK_COUNT.get_mut() = 42;
         sched::record_heartbeat(0, 50);
         assert_eq!(sched::TCBS[0].heartbeat_interval, 50);
         assert_eq!(sched::TCBS[0].last_heartbeat, 42);
@@ -1902,7 +1902,7 @@ fn sched_watchdog_scan_no_violation() {
         // Task 0: heartbeat interval=50, last=10, now=40 → elapsed=30 < 50 → OK
         sched::TCBS[0].heartbeat_interval = 50;
         sched::TCBS[0].last_heartbeat = 10;
-        aegis_os::timer::TICK_COUNT = 40;
+        *aegis_os::timer::TICK_COUNT.get_mut() = 40;
 
         sched::watchdog_scan();
 
@@ -1921,7 +1921,7 @@ fn sched_watchdog_scan_violation_faults_task() {
         sched::TCBS[1].last_heartbeat = 10;
         sched::TCBS[1].priority = 5;
         sched::TCBS[1].base_priority = 3;
-        aegis_os::timer::TICK_COUNT = 70;
+        *aegis_os::timer::TICK_COUNT.get_mut() = 70;
 
         sched::watchdog_scan();
 
@@ -1941,7 +1941,7 @@ fn sched_watchdog_scan_skips_disabled() {
         // Task with heartbeat_interval=0 (disabled) should never be faulted
         sched::TCBS[0].heartbeat_interval = 0;
         sched::TCBS[0].last_heartbeat = 0;
-        aegis_os::timer::TICK_COUNT = 1000;
+        *aegis_os::timer::TICK_COUNT.get_mut() = 1000;
 
         sched::watchdog_scan();
 
@@ -1959,7 +1959,7 @@ fn sched_watchdog_scan_skips_already_faulted() {
         sched::TCBS[0].last_heartbeat = 0;
         sched::TCBS[0].state = TaskState::Faulted;
         sched::TCBS[0].fault_tick = 5;
-        aegis_os::timer::TICK_COUNT = 100;
+        *aegis_os::timer::TICK_COUNT.get_mut() = 100;
 
         sched::watchdog_scan();
 
@@ -2054,7 +2054,7 @@ fn sched_priority_restored_on_fault() {
         sched::TCBS[0].fault_tick = 0;
 
         // Simulate restart
-        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS;
+        *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
         };
@@ -2084,7 +2084,7 @@ fn sched_ticks_used_reset_on_restart() {
         sched::TCBS[1].state = TaskState::Faulted;
         sched::TCBS[1].fault_tick = 0;
 
-        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS;
+        *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
         };
@@ -2104,7 +2104,7 @@ fn sched_heartbeat_reset_on_restart() {
         sched::TCBS[1].state = TaskState::Faulted;
         sched::TCBS[1].fault_tick = 0;
 
-        aegis_os::timer::TICK_COUNT = RESTART_DELAY_TICKS;
+        *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS;
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
         };
@@ -2663,7 +2663,7 @@ fn ipc_sys_send_immediate_delivery() {
         ipc::ENDPOINTS[0].receiver = Some(1);
         sched::TCBS[1].state = TaskState::Blocked;
         // Set task 0 as current (sender), put message in its context
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].context.x[0] = 0xAAAA;
         sched::TCBS[0].context.x[1] = 0xBBBB;
@@ -2689,7 +2689,7 @@ fn ipc_sys_send_blocks_when_no_receiver() {
     // No receiver → sender enqueued and blocked
     unsafe {
         reset_test_state();
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].context.x[0] = 0x1234;
 
@@ -2707,7 +2707,7 @@ fn ipc_sys_send_invalid_endpoint() {
     // Invalid ep_id → no crash, no state change
     unsafe {
         reset_test_state();
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
 
         let mut frame = core::ptr::read(&sched::TCBS[0].context);
@@ -2727,7 +2727,7 @@ fn ipc_sys_send_queue_full() {
         for i in 0..ipc::MAX_WAITERS {
             ipc::ENDPOINTS[0].sender_queue.push(i);
         }
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
 
         let mut frame = core::ptr::read(&sched::TCBS[0].context);
@@ -2753,7 +2753,7 @@ fn ipc_sys_recv_immediate_delivery() {
         ipc::ENDPOINTS[0].sender_queue.push(0);
 
         // Task 1 calls recv
-        sched::CURRENT = 1;
+        *sched::CURRENT.get_mut() = 1;
         sched::TCBS[1].state = TaskState::Running;
         let mut frame = core::ptr::read(&sched::TCBS[1].context);
         ipc::sys_recv(&mut frame, 0);
@@ -2773,7 +2773,7 @@ fn ipc_sys_recv_blocks_when_no_sender() {
     // No sender → receiver blocks
     unsafe {
         reset_test_state();
-        sched::CURRENT = 1;
+        *sched::CURRENT.get_mut() = 1;
         sched::TCBS[1].state = TaskState::Running;
 
         let mut frame = core::ptr::read(&sched::TCBS[1].context);
@@ -2790,7 +2790,7 @@ fn ipc_sys_recv_invalid_endpoint() {
     // Invalid ep_id → no crash
     unsafe {
         reset_test_state();
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
 
         let mut frame = core::ptr::read(&sched::TCBS[0].context);
@@ -2810,7 +2810,7 @@ fn ipc_sys_call_with_receiver_waiting() {
         sched::TCBS[1].state = TaskState::Blocked;
 
         // Task 0 calls sys_call (send + recv)
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].context.x[0] = 0xCAFE;
 
@@ -2834,7 +2834,7 @@ fn ipc_sys_call_no_receiver() {
     // No receiver → enqueue as sender, block
     unsafe {
         reset_test_state();
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].context.x[0] = 0x9999;
 
@@ -2851,7 +2851,7 @@ fn ipc_sys_call_no_receiver() {
 fn ipc_sys_call_invalid_endpoint() {
     unsafe {
         reset_test_state();
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
 
         let mut frame = core::ptr::read(&sched::TCBS[0].context);
@@ -2869,7 +2869,7 @@ fn ipc_sys_call_queue_full() {
         for i in 0..ipc::MAX_WAITERS {
             ipc::ENDPOINTS[0].sender_queue.push(i);
         }
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
 
         let mut frame = core::ptr::read(&sched::TCBS[0].context);
@@ -2897,7 +2897,7 @@ fn ipc_sys_call_priority_boost() {
         sched::TCBS[1].state = TaskState::Blocked;
 
         // Task 0 calls (sends + waits for reply)
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].context.x[0] = 0x42;
 
@@ -2922,7 +2922,7 @@ fn ipc_send_restores_receiver_priority() {
         ipc::ENDPOINTS[0].receiver = Some(1);
         sched::TCBS[1].state = TaskState::Blocked;
 
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].context.x[0] = 0x55;
 
@@ -2941,11 +2941,11 @@ fn sched_fault_current_task_basic() {
     // fault_current_task: marks task Faulted, records fault_tick, cleans up IPC/grant/IRQ
     unsafe {
         reset_test_state();
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].priority = 5;
         sched::TCBS[0].base_priority = 3;
-        aegis_os::timer::TICK_COUNT = 42;
+        *aegis_os::timer::TICK_COUNT.get_mut() = 42;
 
         // Task 0 is receiver on EP0
         ipc::ENDPOINTS[0].receiver = Some(0);
@@ -2971,7 +2971,7 @@ fn sched_fault_current_task_cleans_irq() {
     // fault_current_task cleans up IRQ bindings
     unsafe {
         reset_test_state();
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
 
         // Bind an IRQ (INTID 33) to task 0
@@ -3009,7 +3009,7 @@ fn sched_schedule_no_ready_task_forces_idle() {
     // All tasks blocked/faulted → scheduler forces idle (task 2) Ready
     unsafe {
         reset_test_state();
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[1].state = TaskState::Blocked;
         sched::TCBS[2].state = TaskState::Blocked;
@@ -3032,7 +3032,7 @@ fn sched_schedule_idle_faulted_gets_restarted() {
     // Idle (task 2) is Faulted → schedule forces restart + runs it
     unsafe {
         reset_test_state();
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].time_budget = 10;
         sched::TCBS[0].ticks_used = 10;
@@ -3161,9 +3161,9 @@ fn grant_cleanup_clears_both_roles() {
 fn timer_tick_count_accessor() {
     unsafe {
         reset_test_state();
-        aegis_os::timer::TICK_COUNT = 0;
+        *aegis_os::timer::TICK_COUNT.get_mut() = 0;
         assert_eq!(aegis_os::timer::tick_count(), 0);
-        aegis_os::timer::TICK_COUNT = 12345;
+        *aegis_os::timer::TICK_COUNT.get_mut() = 12345;
         assert_eq!(aegis_os::timer::tick_count(), 12345);
     }
 }
@@ -3180,7 +3180,7 @@ fn ipc_round_trip_message_integrity() {
         sched::TCBS[1].state = TaskState::Blocked;
 
         // Task 0 sends specific message
-        sched::CURRENT = 0;
+        *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].context.x[0] = 0x1111_1111_AAAA_BBBB;
         sched::TCBS[0].context.x[1] = 0x2222_2222_CCCC_DDDD;
@@ -3207,7 +3207,7 @@ fn ipc_recv_loads_frame_on_immediate() {
         sched::TCBS[0].context.x[1] = 0xEF01;
         ipc::ENDPOINTS[0].sender_queue.push(0);
 
-        sched::CURRENT = 1;
+        *sched::CURRENT.get_mut() = 1;
         sched::TCBS[1].state = TaskState::Running;
         let mut frame = core::ptr::read(&sched::TCBS[1].context);
         ipc::sys_recv(&mut frame, 0);

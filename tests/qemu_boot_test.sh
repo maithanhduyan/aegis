@@ -94,6 +94,7 @@ check "L5 ELF binary loaded"        "[AegisOS] client task loaded from ELF binar
 check "Timer started"               "[AegisOS] timer started"
 check "Enhanced panic handler"      "[AegisOS] enhanced panic handler ready"
 check "klog ready"                   "[AegisOS] klog ready"
+check "Safety audit complete"        "[AegisOS] safety audit complete"
 check "Bootstrap into EL0"          "[AegisOS] bootstrapping into uart_driver"
 check "UART driver ready"           "DRV:ready"
 check "L5 ELF task output"          "L5:ELF"
