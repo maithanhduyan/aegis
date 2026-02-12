@@ -55,8 +55,11 @@ pub struct Tcb {
 
 // ─── Static task table ─────────────────────────────────────────────
 
-/// 3 tasks: 0 = task_a, 1 = task_b, 2 = idle
-pub const NUM_TASKS: usize = 3;
+/// Task count: 0 = uart_driver, 1 = client, 2..6 = reserved, 7 = idle
+pub const NUM_TASKS: usize = 8;
+
+/// Index of the idle task (always the last task slot).
+pub const IDLE_TASK_ID: usize = NUM_TASKS - 1;
 
 use crate::kernel::cell::KernelCell;
 
@@ -105,16 +108,24 @@ pub const EMPTY_TCB: Tcb = Tcb {
     last_heartbeat: 0,
 };
 
+// ─── Task metadata (Phase N) ───────────────────────────────────────
+
+/// Static per-task boot configuration: capabilities, priority, budget.
+/// Defined as a const array in main.rs; applied in kernel_main() loop.
+pub struct TaskMetadata {
+    pub caps: CapBits,
+    pub priority: u8,
+    pub time_budget: u64,
+    pub heartbeat_interval: u64,
+}
+
 // ─── Public API ────────────────────────────────────────────────────
 
-/// Initialize scheduler: set up TCBs for task_a, task_b, idle.
+/// Initialize scheduler: set up TCBs for NUM_TASKS tasks.
+/// `entries[i]` = entry point address for task i.
 /// Must be called before enabling timer interrupts.
 #[cfg(target_arch = "aarch64")]
-pub fn init(
-    task_a_entry: u64,
-    task_b_entry: u64,
-    idle_entry: u64,
-) {
+pub fn init(entries: &[u64; NUM_TASKS]) {
     extern "C" {
         static __task_stacks_start: u8;  // kernel stacks (SP_EL1)
         static __user_stacks_start: u8;  // user stacks (SP_EL0)
@@ -130,38 +141,25 @@ pub fn init(
     // When exception from EL0 → EL1, CPU automatically uses SP_EL1
     // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
     unsafe {
-        // Task 0: task_a
-        TCBS[0].id = 0;
-        TCBS[0].state = TaskState::Ready;
-        TCBS[0].stack_top = kstacks_base + 1 * 4096;
-        TCBS[0].entry_point = task_a_entry;
-        TCBS[0].user_stack_top = ustacks_base + 1 * 4096;
-        TCBS[0].context.elr_el1 = task_a_entry;
-        TCBS[0].context.spsr_el1 = 0x000; // EL0t
-        TCBS[0].context.sp_el0 = ustacks_base + 1 * 4096;
-
-        // Task 1: task_b
-        TCBS[1].id = 1;
-        TCBS[1].state = TaskState::Ready;
-        TCBS[1].stack_top = kstacks_base + 2 * 4096;
-        TCBS[1].entry_point = task_b_entry;
-        TCBS[1].user_stack_top = ustacks_base + 2 * 4096;
-        TCBS[1].context.elr_el1 = task_b_entry;
-        TCBS[1].context.spsr_el1 = 0x000; // EL0t
-        TCBS[1].context.sp_el0 = ustacks_base + 2 * 4096;
-
-        // Task 2: idle
-        TCBS[2].id = 2;
-        TCBS[2].state = TaskState::Ready;
-        TCBS[2].stack_top = kstacks_base + 3 * 4096;
-        TCBS[2].entry_point = idle_entry;
-        TCBS[2].user_stack_top = ustacks_base + 3 * 4096;
-        TCBS[2].context.elr_el1 = idle_entry;
-        TCBS[2].context.spsr_el1 = 0x000; // EL0t
-        TCBS[2].context.sp_el0 = ustacks_base + 3 * 4096;
+        for i in 0..NUM_TASKS {
+            TCBS[i].id = i as u16;
+            TCBS[i].stack_top = kstacks_base + (i as u64 + 1) * 4096;
+            TCBS[i].user_stack_top = ustacks_base + (i as u64 + 1) * 4096;
+            if entries[i] != 0 {
+                // Active task: set entry point and mark Ready
+                TCBS[i].state = TaskState::Ready;
+                TCBS[i].entry_point = entries[i];
+                TCBS[i].context.elr_el1 = entries[i];
+                TCBS[i].context.spsr_el1 = 0x000; // EL0t
+                TCBS[i].context.sp_el0 = ustacks_base + (i as u64 + 1) * 4096;
+            }
+            // else: stays Inactive (from EMPTY_TCB)
+        }
     }
 
-    uart_print("[AegisOS] scheduler ready (3 tasks, priority-based, EL0)\n");
+    uart_print("[AegisOS] scheduler ready (");
+    crate::uart_print_dec(NUM_TASKS as u64);
+    uart_print(" tasks, priority-based, EL0)\n");
 }
 
 /// Schedule: save current context, pick next Ready task, load its context.
@@ -207,7 +205,7 @@ pub fn schedule(frame: &mut TrapFrame) {
         // Scan all tasks, pick the Ready task with highest priority
         // that still has budget remaining. Round-robin tiebreaker.
         let mut best_prio: i16 = -1;
-        let mut next = 2; // default to idle
+        let mut next = IDLE_TASK_ID; // default to idle
         let mut found = false;
         for offset in 0..NUM_TASKS {
             let idx = (old + 1 + offset) % NUM_TASKS;
@@ -224,12 +222,12 @@ pub fn schedule(frame: &mut TrapFrame) {
         }
 
         if !found {
-            // No ready task with budget — force idle (index 2)
-            next = 2;
-            if TCBS[2].state == TaskState::Faulted {
-                restart_task(2);
+            // No ready task with budget — force idle
+            next = IDLE_TASK_ID;
+            if TCBS[IDLE_TASK_ID].state == TaskState::Faulted {
+                restart_task(IDLE_TASK_ID);
             }
-            TCBS[2].state = TaskState::Ready;
+            TCBS[IDLE_TASK_ID].state = TaskState::Ready;
         }
 
         // Switch to new task

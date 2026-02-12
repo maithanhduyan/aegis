@@ -108,7 +108,7 @@ Check-Output "Arch separation L1"     "[AegisOS] arch separation: module tree re
 Check-Output "Arch separation L2"     "[AegisOS] arch separation: complete"
 Check-Output "ELF64 parser ready"     "[AegisOS] ELF64 parser ready"
 Check-Output "ELF loader ready"       "[AegisOS] ELF loader ready"
-Check-Output "ELF task loaded"        "[AegisOS] task 2 loaded from ELF"
+Check-Output "ELF task loaded"        "[AegisOS] task 7 loaded from ELF"
 Check-Output "L5 ELF binary loaded"   "[AegisOS] client task loaded from ELF binary"
 Check-Output "Timer started"          "[AegisOS] timer started"
 Check-Output "Enhanced panic handler" "[AegisOS] enhanced panic handler ready"

@@ -7,6 +7,8 @@
 #[cfg(target_arch = "aarch64")]
 use core::ptr;
 
+use crate::kernel::sched::NUM_TASKS;
+
 // ─── Descriptor bits ───────────────────────────────────────────────
 
 /// L1/L2 table descriptor — points to next-level table
@@ -133,32 +135,43 @@ const SCTLR_WXN: u64 = 1 << 19;
 
 // ─── Page table storage (AArch64 only) ─────────────────────────────
 
-/// Number of page table pages (Phase J3: per-task L2_device for MMIO isolation)
-/// [0]  = L2_device task 0   [1]  = L2_device task 1   [2]  = L2_device task 2
-/// [3]  = L1 for task 0       [4]  = L1 for task 1       [5]  = L1 for task 2
-/// [6]  = L2_ram for task 0   [7]  = L2_ram for task 1   [8]  = L2_ram for task 2
-/// [9]  = L3 for task 0       [10] = L3 for task 1       [11] = L3 for task 2
-/// [12] = L2_device kernel    [13] = L1 kernel boot      [14] = L2_ram kernel boot
-/// [15] = L3 kernel boot
-pub const NUM_PAGE_TABLE_PAGES: usize = 16;
+/// Number of page table pages: 4 per task (L2Device, L1, L2Ram, L3) + 4 kernel.
+/// Must match linker.ld `.page_tables` section size: NUM_PAGE_TABLE_PAGES × 4096.
+pub const NUM_PAGE_TABLE_PAGES: usize = 4 * NUM_TASKS + 4;
 
-// Page indices — per-task L2_device (J3)
-pub const PT_L2_DEVICE_0: usize = 0;
-pub const PT_L2_DEVICE_1: usize = 1;
-pub const PT_L2_DEVICE_2: usize = 2;
-pub const PT_L1_TASK0: usize = 3;
-pub const PT_L1_TASK1: usize = 4;
-pub const PT_L1_TASK2: usize = 5;
-pub const PT_L2_RAM_TASK0: usize = 6;
-pub const PT_L2_RAM_TASK1: usize = 7;
-pub const PT_L2_RAM_TASK2: usize = 8;
-pub const PT_L3_TASK0: usize = 9;
-pub const PT_L3_TASK1: usize = 10;
-pub const PT_L3_TASK2: usize = 11;
-pub const PT_L2_DEVICE_KERNEL: usize = 12;
-pub const PT_L1_KERNEL: usize = 13;
-pub const PT_L2_RAM_KERNEL: usize = 14;
-pub const PT_L3_KERNEL: usize = 15;
+// ─── Page table type and computed indexing (Phase N) ───────────────
+
+/// Page table type within a task's 4-table set.
+/// Layout in .page_tables: [L2Device×N | L1×N | L2Ram×N | L3×N | kernel×4]
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(usize)]
+pub enum PageTableType {
+    L2Device = 0,
+    L1       = 1,
+    L2Ram    = 2,
+    L3       = 3,
+}
+
+/// Number of page table types per task.
+pub const PT_TYPES_PER_TASK: usize = 4;
+
+/// Compute the page table index for a given task and table type.
+/// `pt_index(t, L2Device) = 0*N + t`, `pt_index(t, L1) = 1*N + t`, etc.
+pub const fn pt_index(task_id: usize, pt_type: PageTableType) -> usize {
+    pt_type as usize * NUM_TASKS + task_id
+}
+
+// Per-task base indices (task 0) — backward compatibility aliases
+pub const PT_L2_DEVICE_0: usize = pt_index(0, PageTableType::L2Device);
+pub const PT_L1_TASK0: usize = pt_index(0, PageTableType::L1);
+pub const PT_L2_RAM_TASK0: usize = pt_index(0, PageTableType::L2Ram);
+pub const PT_L3_TASK0: usize = pt_index(0, PageTableType::L3);
+
+// Kernel page table indices (always after all per-task tables)
+pub const PT_L2_DEVICE_KERNEL: usize = PT_TYPES_PER_TASK * NUM_TASKS;
+pub const PT_L1_KERNEL: usize = PT_TYPES_PER_TASK * NUM_TASKS + 1;
+pub const PT_L2_RAM_KERNEL: usize = PT_TYPES_PER_TASK * NUM_TASKS + 2;
+pub const PT_L3_KERNEL: usize = PT_TYPES_PER_TASK * NUM_TASKS + 3;
 
 // Linker-provided symbols for page table memory (in .page_tables section)
 #[cfg(target_arch = "aarch64")]
@@ -330,10 +343,9 @@ unsafe fn build_l1(l1_index: usize, l2_ram_index: usize, l2_device_index: usize)
 /// Get physical address of L1 page table for a task.
 /// Returns the base address suitable for TTBR0_EL1 (bits [47:12]).
 pub fn page_table_base(task_id: usize) -> u64 {
-    // task 0 → page 1, task 1 → page 2, task 2 → page 3
     #[cfg(target_arch = "aarch64")]
     {
-        let ptr = table_ptr(PT_L1_TASK0 + task_id);
+        let ptr = table_ptr(pt_index(task_id, PageTableType::L1));
         ptr as u64
     }
     #[cfg(not(target_arch = "aarch64"))]
@@ -352,25 +364,24 @@ pub fn ttbr0_for_task(task_id: usize, asid: u16) -> u64 {
 // ─── MMU enable sequence (called from assembly) ───────────────────
 
 /// Full MMU initialization — called from boot.s after BSS clear.
-/// Phase J3: builds 16 page tables (4 L2_device + 3 per task + 4 kernel boot).
+/// Phase N: builds NUM_PAGE_TABLE_PAGES page tables (4 per task + 4 kernel).
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub unsafe extern "C" fn mmu_init() {
     // SAFETY: builds all page tables using pre-allocated static memory, flushes with asm
     unsafe {
-    // Per-task L2_device tables (pages 0, 1, 2) — all devices EL1-only initially
-    for task in 0..3_usize {
-        build_l2_device(PT_L2_DEVICE_0 + task);
+    // Per-task L2_device tables — all devices EL1-only initially
+    for task in 0..NUM_TASKS {
+        build_l2_device(pt_index(task, PageTableType::L2Device));
     }
-    // Kernel boot L2_device (page 12) — all devices EL1-accessible
+    // Kernel boot L2_device — all devices EL1-accessible
     build_l2_device(PT_L2_DEVICE_KERNEL);
 
-    // Per-task tables (task 0, 1, 2)
-    for task in 0..3_u8 {
-        let t = task as usize;
-        build_l3(PT_L3_TASK0 + t, task);
-        build_l2_ram(PT_L2_RAM_TASK0 + t, PT_L3_TASK0 + t);
-        build_l1(PT_L1_TASK0 + t, PT_L2_RAM_TASK0 + t, PT_L2_DEVICE_0 + t);
+    // Per-task tables
+    for task in 0..NUM_TASKS {
+        build_l3(pt_index(task, PageTableType::L3), task as u8);
+        build_l2_ram(pt_index(task, PageTableType::L2Ram), pt_index(task, PageTableType::L3));
+        build_l1(pt_index(task, PageTableType::L1), pt_index(task, PageTableType::L2Ram), pt_index(task, PageTableType::L2Device));
     }
 
     // Kernel boot tables (owner_task = 0xFF → all user stacks EL1-only)
@@ -425,13 +436,13 @@ pub unsafe fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
         crate::uart_print("!!! DEVICE MAP: invalid device_id\n");
         return DEVICE_MAP_ERR_INVALID_ID;
     }
-    if task_id >= 3 {
+    if task_id >= NUM_TASKS {
         crate::uart_print("!!! DEVICE MAP: invalid task_id\n");
         return DEVICE_MAP_ERR_INVALID_TASK;
     }
 
     let dev = &DEVICES[did];
-    let l2_device = table_ptr(PT_L2_DEVICE_0 + task_id);
+    let l2_device = table_ptr(pt_index(task_id, PageTableType::L2Device));
     let pa = (dev.l2_index as u64) * 0x20_0000;
 
     // Upgrade entry from DEVICE_BLOCK (EL1-only) to DEVICE_BLOCK_EL0 (EL0 accessible)
@@ -464,7 +475,7 @@ pub fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
     if did >= DEVICES.len() {
         return DEVICE_MAP_ERR_INVALID_ID;
     }
-    if task_id >= 3 {
+    if task_id >= NUM_TASKS {
         return DEVICE_MAP_ERR_INVALID_TASK;
     }
     0 // success
@@ -478,7 +489,7 @@ pub fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
 pub unsafe fn map_grant_for_task(grant_phys: u64, task_id: usize) {
     // SAFETY: accesses page table memory, performs TLB invalidation via asm
     unsafe {
-    let l3 = table_ptr(PT_L3_TASK0 + task_id);
+    let l3 = table_ptr(pt_index(task_id, PageTableType::L3));
     let base: u64 = 0x4000_0000;
     let index = ((grant_phys - base) / 4096) as usize;
     if index < 512 {
@@ -502,7 +513,7 @@ pub unsafe fn map_grant_for_task(grant_phys: u64, task_id: usize) {
 pub unsafe fn unmap_grant_for_task(grant_phys: u64, task_id: usize) {
     // SAFETY: accesses page table memory, performs TLB invalidation via asm
     unsafe {
-    let l3 = table_ptr(PT_L3_TASK0 + task_id);
+    let l3 = table_ptr(pt_index(task_id, PageTableType::L3));
     let base: u64 = 0x4000_0000;
     let index = ((grant_phys - base) / 4096) as usize;
     if index < 512 {
@@ -555,7 +566,7 @@ pub const PAGE_ATTR_ERR_OUT_OF_RANGE: u64 = 0xFFFF_3002;
 pub unsafe fn set_page_attr(task_id: usize, vaddr: u64, template: u64) -> u64 {
     // SAFETY: accesses page table memory, performs TLB invalidation via asm
     unsafe {
-    if task_id >= 3 {
+    if task_id >= NUM_TASKS {
         return PAGE_ATTR_ERR_INVALID_TASK;
     }
     let base: u64 = 0x4000_0000;
@@ -563,7 +574,7 @@ pub unsafe fn set_page_attr(task_id: usize, vaddr: u64, template: u64) -> u64 {
         return PAGE_ATTR_ERR_OUT_OF_RANGE;
     }
     let index = ((vaddr - base) / 4096) as usize;
-    let l3 = table_ptr(PT_L3_TASK0 + task_id);
+    let l3 = table_ptr(pt_index(task_id, PageTableType::L3));
     write_entry(l3, index, vaddr | template);
 
     // TLB invalidate for this task's ASID
@@ -582,7 +593,7 @@ pub unsafe fn set_page_attr(task_id: usize, vaddr: u64, template: u64) -> u64 {
 /// Host-test stub for set_page_attr
 #[cfg(not(target_arch = "aarch64"))]
 pub fn set_page_attr(task_id: usize, vaddr: u64, _template: u64) -> u64 {
-    if task_id >= 3 {
+    if task_id >= NUM_TASKS {
         return PAGE_ATTR_ERR_INVALID_TASK;
     }
     let base: u64 = 0x4000_0000;

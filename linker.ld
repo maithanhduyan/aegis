@@ -33,31 +33,33 @@ SECTIONS
         __bss_end = .;
     }
 
-    /* === Page Tables (16 × 4096 = 64 KiB, 4KB-aligned) === */
-    /* Layout: [0..2]=L2_device per task, [3..5]=L1 per task, [6..8]=L2_ram per task,
-       [9..11]=L3 per task, [12]=L2_device kernel, [13]=L1 kernel, [14]=L2_ram kernel, [15]=L3 kernel */
+    /* === Page Tables ((4*NUM_TASKS+4) × 4096, 4KB-aligned) === */
+    /* Layout: [L2Device×N | L1×N | L2Ram×N | L3×N | kernel×4]  (N=NUM_TASKS) */
+    /* SYNC: size must equal mmu::NUM_PAGE_TABLE_PAGES × 4096  (NUM_TASKS=8 → 36) */
     . = ALIGN(4096);
     __page_tables_start = .;
     .page_tables (NOLOAD) : {
-        . += 16 * 4096;
+        . += 36 * 4096;
     }
     __page_tables_end = .;
 
-    /* === Kernel Stacks per task (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    /* === Kernel Stacks per task (NUM_TASKS × 4KB, 4KB-aligned) === */
     /* Used as SP_EL1 when handling exceptions from EL0 tasks */
+    /* SYNC: count must equal sched::NUM_TASKS  (NUM_TASKS=8 → 8) */
     . = ALIGN(4096);
     __task_stacks_start = .;
     .task_stacks (NOLOAD) : {
-        . += 3 * 4096;
+        . += 8 * 4096;
     }
     __task_stacks_end = .;
 
-    /* === User Stacks per task (3 × 4KB = 12 KiB, 4KB-aligned) === */
+    /* === User Stacks per task (NUM_TASKS × 4KB, 4KB-aligned) === */
     /* Used as SP_EL0 when tasks run in user mode (EL0) */
+    /* SYNC: count must equal sched::NUM_TASKS  (NUM_TASKS=8 → 8) */
     . = ALIGN(4096);
     __user_stacks_start = .;
     .user_stacks (NOLOAD) : {
-        . += 3 * 4096;
+        . += 8 * 4096;
     }
     __user_stacks_end = .;
 

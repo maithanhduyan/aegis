@@ -410,48 +410,76 @@ pub extern "C" fn kernel_main() -> ! {
     gic::set_priority(timer::TIMER_INTID, 0);
     gic::enable_intid(timer::TIMER_INTID);
 
-    sched::init(
-        uart_driver_entry as *const () as u64,
-        client_entry as *const () as u64,
-        idle_entry as *const () as u64,
-    );
+    sched::init(&[
+        uart_driver_entry as *const () as u64,  // task 0: UART driver
+        client_entry as *const () as u64,        // task 1: client
+        0,                                        // task 2: reserved (Inactive)
+        0,                                        // task 3: reserved (Inactive)
+        0,                                        // task 4: reserved (Inactive)
+        0,                                        // task 5: reserved (Inactive)
+        0,                                        // task 6: reserved (Inactive)
+        idle_entry as *const () as u64,           // task 7: idle (IDLE_TASK_ID)
+    ]);
 
-    // ─── Phase G: Assign capabilities ──────────────────────────────
-    // SAFETY: Single-core kernel, called during boot before interrupts enabled. No concurrent access.
-    unsafe {
+    // ─── Phase N: Apply per-task metadata from const table ─────────
+    {
         use aegis_os::cap::*;
-        // Task 0 (UART driver): needs RECV/SEND on EP0 + WRITE + YIELD + notifications + grants + IRQ + device map + heartbeat
-        sched::TCBS[0].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
-            | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE
-            | CAP_IRQ_BIND | CAP_IRQ_ACK | CAP_DEVICE_MAP | CAP_HEARTBEAT;
-        // Task 1 (client): needs CALL on EP0 + WRITE + YIELD + notifications + grants + heartbeat
-        sched::TCBS[1].caps = CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
-            | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE
-            | CAP_HEARTBEAT;
-        // Task 2 (idle / ELF-loaded): needs YIELD + WRITE (L5 ELF task uses SYS_WRITE)
-        sched::TCBS[2].caps = CAP_YIELD | CAP_WRITE;
+        use aegis_os::sched::TaskMetadata;
+        use aegis_os::mmu;
+
+        // Metadata for inactive tasks (zero caps, lowest priority)
+        const INACTIVE: TaskMetadata = TaskMetadata {
+            caps: 0, priority: 0, time_budget: 0, heartbeat_interval: 0,
+        };
+
+        const TASK_META: [TaskMetadata; sched::NUM_TASKS] = [
+            // Task 0 (UART driver): high priority, unlimited budget, full driver caps
+            TaskMetadata {
+                caps: CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
+                    | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE
+                    | CAP_IRQ_BIND | CAP_IRQ_ACK | CAP_DEVICE_MAP | CAP_HEARTBEAT,
+                priority: 6,
+                time_budget: 0,
+                heartbeat_interval: 0,
+            },
+            // Task 1 (client): medium priority, 50 ticks budget
+            TaskMetadata {
+                caps: CAP_IPC_SEND_EP0 | CAP_IPC_RECV_EP0 | CAP_WRITE | CAP_YIELD
+                    | CAP_NOTIFY | CAP_WAIT_NOTIFY | CAP_GRANT_CREATE | CAP_GRANT_REVOKE
+                    | CAP_HEARTBEAT,
+                priority: 4,
+                time_budget: 50,
+                heartbeat_interval: 0,
+            },
+            INACTIVE, // task 2: reserved
+            INACTIVE, // task 3: reserved
+            INACTIVE, // task 4: reserved
+            INACTIVE, // task 5: reserved
+            INACTIVE, // task 6: reserved
+            // Task 7 (idle / ELF demo): runs briefly then defers
+            TaskMetadata {
+                caps: CAP_YIELD | CAP_WRITE,
+                priority: 5,
+                time_budget: 2,
+                heartbeat_interval: 0,
+            },
+        ];
+
+        // SAFETY: Single-core kernel, called during boot before interrupts enabled.
+        unsafe {
+            for i in 0..sched::NUM_TASKS {
+                sched::TCBS[i].caps = TASK_META[i].caps;
+                sched::TCBS[i].priority = TASK_META[i].priority;
+                sched::TCBS[i].base_priority = TASK_META[i].priority;
+                sched::TCBS[i].time_budget = TASK_META[i].time_budget;
+                sched::TCBS[i].heartbeat_interval = TASK_META[i].heartbeat_interval;
+                // ASID = task_id + 1 (ASID 0 is reserved for kernel boot)
+                // All tasks get page tables (even inactive — no harm, enables future activation)
+                sched::TCBS[i].ttbr0 = mmu::ttbr0_for_task(i, (i + 1) as u16);
+            }
+        }
     }
     uart_print("[AegisOS] capabilities assigned\n");
-
-    // ─── Phase K: Assign priorities and time budgets ────────────────
-    // SAFETY: Single-core kernel, called during boot before interrupts enabled. No concurrent access.
-    unsafe {
-        // Task 0 (UART driver): high priority, unlimited budget
-        sched::TCBS[0].priority = 6;
-        sched::TCBS[0].base_priority = 6;
-        sched::TCBS[0].time_budget = 0; // unlimited
-
-        // Task 1 (client): medium priority, 50 ticks budget per epoch
-        sched::TCBS[1].priority = 4;
-        sched::TCBS[1].base_priority = 4;
-        sched::TCBS[1].time_budget = 50;
-
-        // Task 2 (ELF demo): runs briefly at boot to prove ELF loading,
-        // then defers to task 1 once its 2-tick budget is exhausted.
-        sched::TCBS[2].priority = 5;
-        sched::TCBS[2].base_priority = 5;
-        sched::TCBS[2].time_budget = 2; // 2 ticks, then defer
-    }
     uart_print("[AegisOS] priority scheduler configured\n");
     uart_print("[AegisOS] time budget enforcement enabled\n");
     uart_print("[AegisOS] watchdog heartbeat enabled\n");
@@ -459,16 +487,6 @@ pub extern "C" fn kernel_main() -> ! {
     uart_print("[AegisOS] grant system ready\n");
     uart_print("[AegisOS] IRQ routing ready\n");
     uart_print("[AegisOS] device MMIO mapping ready\n");
-
-    // ─── Phase H: Assign per-task address spaces ───────────────────
-    // SAFETY: Single-core kernel, called during boot before interrupts enabled. No concurrent access.
-    unsafe {
-        use aegis_os::mmu;
-        // ASID = task_id + 1 (ASID 0 is reserved for kernel boot)
-        sched::TCBS[0].ttbr0 = mmu::ttbr0_for_task(0, 1);
-        sched::TCBS[1].ttbr0 = mmu::ttbr0_for_task(1, 2);
-        sched::TCBS[2].ttbr0 = mmu::ttbr0_for_task(2, 3);
-    }
     uart_print("[AegisOS] per-task address spaces assigned\n");
 
     // ─── Phase L: Arch separation ──────────────────────────────────
@@ -525,7 +543,7 @@ pub extern "C" fn kernel_main() -> ! {
                     );
                 }
                 // Set page permissions per segment
-                // SAFETY: task_id=2 is valid, vaddr from validated ELF segments. set_page_attr updates page table and invalidates TLB.
+                // SAFETY: IDLE_TASK_ID is valid, vaddr from validated ELF segments.
                 unsafe {
                     use aegis_os::mmu;
                     for i in 0..info.num_segments {
@@ -541,19 +559,21 @@ pub extern "C" fn kernel_main() -> ! {
                             let seg_end = (seg.vaddr + seg.memsz + 0xFFF) & !0xFFF;
                             let mut page = seg_start;
                             while page < seg_end {
-                                mmu::set_page_attr(2, page, template);
+                                mmu::set_page_attr(sched::IDLE_TASK_ID, page, template);
                                 page += 4096;
                             }
                         }
                     }
                 }
-                // Override task 2 with ELF-loaded entry point
-                // SAFETY: Single-core kernel, called during boot. Task 2 not yet running.
+                // Override idle task with ELF-loaded entry point
+                // SAFETY: Single-core kernel, called during boot. Idle task not yet running.
                 unsafe {
-                    sched::TCBS[2].entry_point = entry;
-                    sched::TCBS[2].context.elr_el1 = entry;
+                    sched::TCBS[sched::IDLE_TASK_ID].entry_point = entry;
+                    sched::TCBS[sched::IDLE_TASK_ID].context.elr_el1 = entry;
                 }
-                uart_print("[AegisOS] task 2 loaded from ELF (entry=0x");
+                uart_print("[AegisOS] task ");
+                aegis_os::uart_print_dec(sched::IDLE_TASK_ID as u64);
+                uart_print(" loaded from ELF (entry=0x");
                 aegis_os::uart_print_hex(entry);
                 uart_print(")\n");
                 uart_print("[AegisOS] client task loaded from ELF binary\n");

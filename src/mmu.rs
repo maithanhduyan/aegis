@@ -4,6 +4,8 @@
 /// On AArch64: this file is NOT compiled — the full implementation
 /// lives in arch/aarch64/mmu.rs and is loaded via `#[path]` in lib.rs.
 
+use crate::kernel::sched::NUM_TASKS;
+
 // ─── Descriptor bits ───────────────────────────────────────────────
 
 /// L1/L2 table descriptor — points to next-level table
@@ -82,28 +84,42 @@ pub const USER_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | A
 /// Shared code page: Normal WB, RO (EL0+EL1), executable by both EL1 and EL0
 pub const SHARED_CODE_PAGE: u64 = PAGE | ATTR_NORMAL_WB | AP_RO_EL0 | SH_INNER | AF;
 
-// ─── Page table storage constants ──────────────────────────────────
+// ─── Page table storage constants (Phase N: computed from NUM_TASKS) ─
 
-/// Number of page table pages
-pub const NUM_PAGE_TABLE_PAGES: usize = 16;
+/// Number of page table pages: 4 per task + 4 kernel.
+pub const NUM_PAGE_TABLE_PAGES: usize = 4 * NUM_TASKS + 4;
 
-// Page indices
-pub const PT_L2_DEVICE_0: usize = 0;
-pub const PT_L2_DEVICE_1: usize = 1;
-pub const PT_L2_DEVICE_2: usize = 2;
-pub const PT_L1_TASK0: usize = 3;
-pub const PT_L1_TASK1: usize = 4;
-pub const PT_L1_TASK2: usize = 5;
-pub const PT_L2_RAM_TASK0: usize = 6;
-pub const PT_L2_RAM_TASK1: usize = 7;
-pub const PT_L2_RAM_TASK2: usize = 8;
-pub const PT_L3_TASK0: usize = 9;
-pub const PT_L3_TASK1: usize = 10;
-pub const PT_L3_TASK2: usize = 11;
-pub const PT_L2_DEVICE_KERNEL: usize = 12;
-pub const PT_L1_KERNEL: usize = 13;
-pub const PT_L2_RAM_KERNEL: usize = 14;
-pub const PT_L3_KERNEL: usize = 15;
+// ─── Page table type and computed indexing (Phase N) ───────────────
+
+/// Page table type within a task's 4-table set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(usize)]
+pub enum PageTableType {
+    L2Device = 0,
+    L1       = 1,
+    L2Ram    = 2,
+    L3       = 3,
+}
+
+/// Number of page table types per task.
+pub const PT_TYPES_PER_TASK: usize = 4;
+
+/// Compute the page table index for a given task and table type.
+pub const fn pt_index(task_id: usize, pt_type: PageTableType) -> usize {
+    pt_type as usize * NUM_TASKS + task_id
+}
+
+// Per-task base indices (task 0) — backward compatibility aliases
+pub const PT_L2_DEVICE_0: usize = pt_index(0, PageTableType::L2Device);
+pub const PT_L1_TASK0: usize = pt_index(0, PageTableType::L1);
+pub const PT_L2_RAM_TASK0: usize = pt_index(0, PageTableType::L2Ram);
+pub const PT_L3_TASK0: usize = pt_index(0, PageTableType::L3);
+
+// Kernel page table indices
+pub const PT_L2_DEVICE_KERNEL: usize = PT_TYPES_PER_TASK * NUM_TASKS;
+pub const PT_L1_KERNEL: usize = PT_TYPES_PER_TASK * NUM_TASKS + 1;
+pub const PT_L2_RAM_KERNEL: usize = PT_TYPES_PER_TASK * NUM_TASKS + 2;
+pub const PT_L3_KERNEL: usize = PT_TYPES_PER_TASK * NUM_TASKS + 3;
 
 // ─── Phase J3: Device MMIO mapping ─────────────────────────────────
 
@@ -148,7 +164,7 @@ pub fn map_device_for_task(device_id: u64, task_id: usize) -> u64 {
     if did >= DEVICES.len() {
         return DEVICE_MAP_ERR_INVALID_ID;
     }
-    if task_id >= 3 {
+    if task_id >= NUM_TASKS {
         return DEVICE_MAP_ERR_INVALID_TASK;
     }
     0 // success
@@ -163,7 +179,7 @@ pub const PAGE_ATTR_ERR_OUT_OF_RANGE: u64 = 0xFFFF_3002;
 
 /// Host-test stub for set_page_attr — validates params, no actual write.
 pub fn set_page_attr(task_id: usize, vaddr: u64, _template: u64) -> u64 {
-    if task_id >= 3 {
+    if task_id >= NUM_TASKS {
         return PAGE_ATTR_ERR_INVALID_TASK;
     }
     let base: u64 = 0x4000_0000;

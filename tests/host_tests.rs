@@ -18,7 +18,7 @@ use core::mem;
 use aegis_os::exception::{TrapFrame, TRAPFRAME_SIZE, validate_write_args};
 use aegis_os::mmu;
 use aegis_os::sched::{
-    self, TaskState, Tcb, EMPTY_TCB, NUM_TASKS, RESTART_DELAY_TICKS,
+    self, TaskState, Tcb, EMPTY_TCB, NUM_TASKS, IDLE_TASK_ID, RESTART_DELAY_TICKS,
 };
 use aegis_os::ipc::{self, EMPTY_EP, MAX_ENDPOINTS, MSG_REGS};
 use aegis_os::cap::{
@@ -393,7 +393,7 @@ fn sched_task_state_values() {
 
 #[test]
 fn sched_num_tasks() {
-    assert_eq!(NUM_TASKS, 3);
+    assert_eq!(NUM_TASKS, 8);
 }
 
 #[test]
@@ -429,24 +429,20 @@ fn sched_round_robin_all_ready() {
     unsafe {
         reset_test_state();
 
-        // Task 0 is Running, 1 and 2 are Ready
-        // schedule() should pick task 1
+        // All tasks Ready (equal priority 0), round-robin tiebreaker.
+        // schedule() picks the next Ready task after current.
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
         };
 
-        sched::schedule(&mut frame);
-        assert_eq!(read_current(), 1);
-        assert_eq!(sched::TCBS[1].state, TaskState::Running);
-        assert_eq!(sched::TCBS[0].state, TaskState::Ready);
+        // Cycle through all tasks: 0→1→2→...→NUM_TASKS-1→0
+        for expected in 1..NUM_TASKS {
+            sched::schedule(&mut frame);
+            assert_eq!(read_current(), expected);
+            assert_eq!(sched::TCBS[expected].state, TaskState::Running);
+        }
 
-        // Next schedule should pick task 2
-        sched::schedule(&mut frame);
-        assert_eq!(read_current(), 2);
-        assert_eq!(sched::TCBS[2].state, TaskState::Running);
-        assert_eq!(sched::TCBS[1].state, TaskState::Ready);
-
-        // Next schedule should wrap around to task 0
+        // Wrap around to task 0
         sched::schedule(&mut frame);
         assert_eq!(read_current(), 0);
         assert_eq!(sched::TCBS[0].state, TaskState::Running);
@@ -522,20 +518,20 @@ fn sched_idle_fallback() {
     unsafe {
         reset_test_state();
 
-        // Fault all tasks except idle (task 2)
-        sched::TCBS[0].state = TaskState::Faulted;
-        sched::TCBS[0].fault_tick = 0;
-        sched::TCBS[1].state = TaskState::Faulted;
-        sched::TCBS[1].fault_tick = 0;
-        sched::TCBS[2].state = TaskState::Running;
-        *sched::CURRENT.get_mut() = 2;
+        // Fault all tasks except idle (IDLE_TASK_ID)
+        for i in 0..IDLE_TASK_ID {
+            sched::TCBS[i].state = TaskState::Faulted;
+            sched::TCBS[i].fault_tick = 0;
+        }
+        sched::TCBS[IDLE_TASK_ID].state = TaskState::Running;
+        *sched::CURRENT.get_mut() = IDLE_TASK_ID;
 
         let mut frame = TrapFrame {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
         };
         sched::schedule(&mut frame);
-        // Only task 2 (idle) is Ready → should pick task 2
-        assert_eq!(read_current(), 2);
+        // Only idle task is Ready → should pick idle
+        assert_eq!(read_current(), IDLE_TASK_ID);
     }
 }
 
@@ -1678,7 +1674,7 @@ fn device_map_invalid_device_id() {
 
 #[test]
 fn device_map_invalid_task_id() {
-    let r = mmu::map_device_for_task(0, 5);
+    let r = mmu::map_device_for_task(0, NUM_TASKS);
     assert_eq!(r, mmu::DEVICE_MAP_ERR_INVALID_TASK, "invalid task_id should fail");
 }
 
@@ -1700,17 +1696,43 @@ fn cap_all_includes_device_map() {
 }
 
 #[test]
-fn page_table_constants_j3() {
-    // Verify the new 16-page layout constants
-    assert_eq!(mmu::NUM_PAGE_TABLE_PAGES, 16);
+fn page_table_constants_computed() {
+    use aegis_os::mmu::PageTableType;
+    // Phase N: verify computed page table layout (4 per task + 4 kernel)
+    assert_eq!(mmu::NUM_PAGE_TABLE_PAGES, 4 * NUM_TASKS + 4);
+    // Base aliases still resolve correctly
+    assert_eq!(mmu::PT_L2_DEVICE_0, mmu::pt_index(0, PageTableType::L2Device));
+    assert_eq!(mmu::PT_L1_TASK0, mmu::pt_index(0, PageTableType::L1));
+    assert_eq!(mmu::PT_L2_RAM_TASK0, mmu::pt_index(0, PageTableType::L2Ram));
+    assert_eq!(mmu::PT_L3_TASK0, mmu::pt_index(0, PageTableType::L3));
+    // Computed indices for all tasks follow bank layout
+    for t in 0..NUM_TASKS {
+        assert_eq!(mmu::pt_index(t, PageTableType::L2Device), 0 * NUM_TASKS + t);
+        assert_eq!(mmu::pt_index(t, PageTableType::L1), 1 * NUM_TASKS + t);
+        assert_eq!(mmu::pt_index(t, PageTableType::L2Ram), 2 * NUM_TASKS + t);
+        assert_eq!(mmu::pt_index(t, PageTableType::L3), 3 * NUM_TASKS + t);
+    }
+    // Kernel constants sit after all per-task tables
+    assert_eq!(mmu::PT_L2_DEVICE_KERNEL, 4 * NUM_TASKS);
+    assert_eq!(mmu::PT_L1_KERNEL, 4 * NUM_TASKS + 1);
+    assert_eq!(mmu::PT_L2_RAM_KERNEL, 4 * NUM_TASKS + 2);
+    assert_eq!(mmu::PT_L3_KERNEL, 4 * NUM_TASKS + 3);
+    // Sanity: with NUM_TASKS=8, verify exact computed values
+    assert_eq!(mmu::NUM_PAGE_TABLE_PAGES, 36);
     assert_eq!(mmu::PT_L2_DEVICE_0, 0);
-    assert_eq!(mmu::PT_L2_DEVICE_1, 1);
-    assert_eq!(mmu::PT_L2_DEVICE_2, 2);
-    assert_eq!(mmu::PT_L1_TASK0, 3);
-    assert_eq!(mmu::PT_L3_TASK0, 9);
-    assert_eq!(mmu::PT_L2_DEVICE_KERNEL, 12);
-    assert_eq!(mmu::PT_L1_KERNEL, 13);
-    assert_eq!(mmu::PT_L3_KERNEL, 15);
+    assert_eq!(mmu::PT_L1_TASK0, 8);
+    assert_eq!(mmu::PT_L3_TASK0, 24);
+    assert_eq!(mmu::PT_L2_DEVICE_KERNEL, 32);
+    assert_eq!(mmu::PT_L1_KERNEL, 33);
+    assert_eq!(mmu::PT_L3_KERNEL, 35);
+}
+
+#[test]
+fn idle_task_id_is_last() {
+    // IDLE_TASK_ID must always be the last task slot
+    assert_eq!(IDLE_TASK_ID, NUM_TASKS - 1);
+    // With NUM_TASKS=8, idle is at index 7
+    assert_eq!(IDLE_TASK_ID, 7);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1758,15 +1780,13 @@ fn sched_same_priority_round_robin() {
             x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
         };
 
-        // From task 0 → should pick task 1 (round-robin tiebreaker)
-        sched::schedule(&mut frame);
-        assert_eq!(read_current(), 1);
+        // Round-robin: from task 0 → 1 → 2 → ... → NUM_TASKS-1 → 0
+        for expected in 1..NUM_TASKS {
+            sched::schedule(&mut frame);
+            assert_eq!(read_current(), expected);
+        }
 
-        // From task 1 → should pick task 2
-        sched::schedule(&mut frame);
-        assert_eq!(read_current(), 2);
-
-        // From task 2 → should wrap to task 0
+        // Wrap back to task 0
         sched::schedule(&mut frame);
         assert_eq!(read_current(), 0);
     }
@@ -2449,7 +2469,7 @@ fn mmu_set_page_attr_host_stub() {
     assert_eq!(mmu::set_page_attr(2, 0x4000_0000, mmu::KERNEL_DATA_PAGE), 0);
     // Invalid task
     assert_eq!(
-        mmu::set_page_attr(3, 0x4010_0000, mmu::USER_CODE_PAGE),
+        mmu::set_page_attr(NUM_TASKS, 0x4010_0000, mmu::USER_CODE_PAGE),
         mmu::PAGE_ATTR_ERR_INVALID_TASK
     );
     // Out of range: below L3 base
@@ -2497,7 +2517,7 @@ fn l6_kernel_module_exports() {
     assert_ne!(cap::CAP_WRITE, 0);
 
     // Scheduler
-    assert_eq!(sched::NUM_TASKS, 3);
+    assert_eq!(sched::NUM_TASKS, 8);
     assert!(sched::RESTART_DELAY_TICKS > 0);
     assert!(sched::EPOCH_LENGTH > 0);
 
@@ -3006,13 +3026,15 @@ fn sched_restart_task_non_faulted_noop() {
 
 #[test]
 fn sched_schedule_no_ready_task_forces_idle() {
-    // All tasks blocked/faulted → scheduler forces idle (task 2) Ready
+    // All tasks blocked/faulted → scheduler forces idle (IDLE_TASK_ID) Ready
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
-        sched::TCBS[1].state = TaskState::Blocked;
-        sched::TCBS[2].state = TaskState::Blocked;
+        // Block all non-running, non-idle tasks
+        for i in 1..NUM_TASKS {
+            sched::TCBS[i].state = TaskState::Blocked;
+        }
 
         // Set budgets: task 0 has exhausted budget
         sched::TCBS[0].time_budget = 10;
@@ -3021,31 +3043,34 @@ fn sched_schedule_no_ready_task_forces_idle() {
         let mut frame = core::ptr::read(&sched::TCBS[0].context);
         sched::schedule(&mut frame);
 
-        // Should fallback to idle (task 2), forced Ready → Running
-        assert_eq!(read_current(), 2);
-        assert_eq!(sched::TCBS[2].state, TaskState::Running);
+        // Should fallback to idle, forced Ready → Running
+        assert_eq!(read_current(), IDLE_TASK_ID);
+        assert_eq!(sched::TCBS[IDLE_TASK_ID].state, TaskState::Running);
     }
 }
 
 #[test]
 fn sched_schedule_idle_faulted_gets_restarted() {
-    // Idle (task 2) is Faulted → schedule forces restart + runs it
+    // Idle (IDLE_TASK_ID) is Faulted → schedule forces restart + runs it
     unsafe {
         reset_test_state();
         *sched::CURRENT.get_mut() = 0;
         sched::TCBS[0].state = TaskState::Running;
         sched::TCBS[0].time_budget = 10;
         sched::TCBS[0].ticks_used = 10;
-        sched::TCBS[1].state = TaskState::Blocked;
-        sched::TCBS[2].state = TaskState::Faulted;
-        sched::TCBS[2].fault_tick = 0;
+        // Block all non-running, non-idle tasks
+        for i in 1..IDLE_TASK_ID {
+            sched::TCBS[i].state = TaskState::Blocked;
+        }
+        sched::TCBS[IDLE_TASK_ID].state = TaskState::Faulted;
+        sched::TCBS[IDLE_TASK_ID].fault_tick = 0;
 
         let mut frame = core::ptr::read(&sched::TCBS[0].context);
         sched::schedule(&mut frame);
 
         // Idle should be forced Ready → Running
-        assert_eq!(read_current(), 2);
-        assert_eq!(sched::TCBS[2].state, TaskState::Running);
+        assert_eq!(read_current(), IDLE_TASK_ID);
+        assert_eq!(sched::TCBS[IDLE_TASK_ID].state, TaskState::Running);
     }
 }
 
