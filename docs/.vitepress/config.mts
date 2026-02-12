@@ -60,6 +60,8 @@ export default defineConfig({
             { text: 'I — Enhanced IPC & Notifications', link: '/plan/09-plan-enhanced-ipc-notifications_2026-02-11_23-59' },
             { text: 'J — Shared Memory & IRQ Routing', link: '/plan/10-plan-shared-memory-irq-routing-user-driver_2026-02-12_00-30' },
             { text: 'K — Priority Scheduler & Watchdog', link: '/plan/11-plan-priority-scheduler-watchdog_2026-02-12_08-00' },
+            { text: 'L — Arch Separation & ELF Loader', link: '/plan/12-plan-arch-separation-elf-loader_2026-02-12_15-00' },
+            { text: 'M — Safety Assurance Foundation', link: '/plan/13-plan-phase-m-safety-assurance_2026-02-12_20-00' },
           ],
         },
       ],

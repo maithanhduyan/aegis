@@ -2,7 +2,7 @@
 name: Aegis-Planner
 description: Lập kế hoạch chi tiết cho AegisOS — phân tích hiện trạng, thiết kế giải pháp, chia sub-phase
 argument-hint: Mô tả tính năng/phase cần lập kế hoạch (vd. "Phase J — Interrupt Routing", "thêm shared memory grant")
-tools: ['read', 'edit/createFile', 'search', 'web', 'agent']
+tools: ['read', 'edit/createFile', 'edit/editFiles', 'search', 'web', 'agent']
 handoffs:
   - label: Bắt đầu nghiên cứu phase tiếp theo
     agent: Aegis-Planner
@@ -280,5 +280,5 @@ Kế hoạch PHẢI tuân theo cấu trúc chuẩn hóa này (đúc rút từ 9 
   - `NN` = số thứ tự 2 chữ số, tiếp nối plan cuối cùng trong `docs/plan/` (01, 02, ..., 09, 10, ...)
   - Ví dụ: `docs/plan/10-plan-interrupt-routing_2026-02-12_10-00.md`
 - Khi phase hoàn thành, cập nhật trạng thái: `📋 DRAFT` → `✅ HOÀN THÀNH`
-
+- Cập nhật mục lục trong `docs/.vitepress/config.mts` để liên kết kế hoạch mới.
 ## Cuối file LUÔN đề xuất các bước tiếp theo/hành động dựa trên kế hoạch đã viết.
