@@ -13,3 +13,4 @@ pub mod timer;
 pub mod grant;
 pub mod irq;
 pub mod elf;
+pub mod log;
