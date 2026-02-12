@@ -551,5 +551,5 @@ Phase M **DONE** khi tất cả điều kiện sau đạt:
 6. [x] Triển khai M1: ~92 SAFETY comments + `KernelCell<T>` (4 globals)
 7. [x] Chạy test suite đầy đủ — **219 host tests + 28 QEMU checkpoints pass**
 8. [x] Push to `origin/main` — commits `75a9593`..`02afae8`
-9. [ ] Viết blog Phase M giải thích (handoff → Aegis-StoryTeller)
+9. [x] Viết blog Phase M giải thích — bài #13 `docs/blog/13-lam-sao-chung-minh-phan-mem-khong-co-loi.md`
 10. [ ] Chuẩn bị Phase N roadmap: NUM_TASKS=8 + Kani pilot + TCBS/ENDPOINTS/GRANTS/IRQ_BINDINGS encapsulation

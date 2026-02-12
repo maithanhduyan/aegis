@@ -41,6 +41,7 @@ export default defineConfig({
             { text: '#10 — User-Mode Driver', link: '/blog/10-khi-chuong-trinh-tu-noi-chuyen-voi-phan-cung' },
             { text: '#11 — Priority Scheduler & Watchdog', link: '/blog/11-ai-duoc-chay-truoc-va-ai-canh-gac' },
             { text: '#12 — Arch Separation & ELF Loading', link: '/blog/12-don-nha-va-doc-sach-muc-luc' },
+            { text: '#13 — Safety Assurance', link: '/blog/13-lam-sao-chung-minh-phan-mem-khong-co-loi' },
           ],
         },
       ],
