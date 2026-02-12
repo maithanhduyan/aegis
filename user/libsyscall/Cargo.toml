@@ -1,0 +1,8 @@
+[package]
+name = "libsyscall"
+version = "0.1.0"
+edition = "2021"
+description = "AegisOS user-space syscall wrappers — single source of truth"
+
+[lib]
+name = "libsyscall"

@@ -26,6 +26,7 @@ pub enum TaskState {
     Running  = 2,
     Blocked  = 3,
     Faulted  = 4,
+    Exited   = 5,
 }
 
 // ─── Task Control Block ────────────────────────────────────────────
@@ -305,6 +306,30 @@ pub fn load_frame(task_idx: usize, frame: &mut TrapFrame) {
     }
 }
 
+/// Cleanup all resources held by a task: IPC endpoints, grants, IRQ bindings,
+/// watchdog, and priority inheritance. Shared by fault_current_task() and sys_exit().
+///
+/// SAFETY: Caller must ensure single-core kernel context with interrupts masked.
+pub unsafe fn cleanup_task_resources(task_idx: usize) {
+    // SAFETY: Single-core kernel, interrupts masked. No concurrent access on uniprocessor QEMU virt.
+    unsafe {
+        // Restore base priority (undo any inheritance)
+        (*TCBS.get_mut())[task_idx].priority = (*TCBS.get_mut())[task_idx].base_priority;
+
+        // Disable watchdog monitoring
+        (*TCBS.get_mut())[task_idx].heartbeat_interval = 0;
+    }
+
+    // Clean up IPC endpoints — unblock any partner waiting for this task
+    crate::ipc::cleanup_task(task_idx);
+
+    // Clean up shared memory grants — revoke all grants involving this task
+    crate::grant::cleanup_task(task_idx);
+
+    // Clean up IRQ bindings — unbind all IRQs owned by this task
+    crate::irq::irq_cleanup_task(task_idx);
+}
+
 /// Mark the currently running task as Faulted, cleanup IPC, and schedule away.
 /// Called from exception handlers when a lower-EL fault is recoverable.
 pub fn fault_current_task(frame: &mut TrapFrame) {
@@ -320,19 +345,34 @@ pub fn fault_current_task(frame: &mut TrapFrame) {
         (*TCBS.get_mut())[current].state = TaskState::Faulted;
         (*TCBS.get_mut())[current].fault_tick = crate::timer::tick_count();
 
-        // Phase K: Restore base priority (undo any inheritance)
-        (*TCBS.get_mut())[current].priority = (*TCBS.get_mut())[current].base_priority;
-
-        // Clean up IPC endpoints — unblock any partner waiting for this task
-        crate::ipc::cleanup_task(current);
-
-        // Clean up shared memory grants — revoke all grants involving this task
-        crate::grant::cleanup_task(current);
-
-        // Clean up IRQ bindings — unbind all IRQs owned by this task
-        crate::irq::irq_cleanup_task(current);
+        // Cleanup all task resources (IPC, grants, IRQ, watchdog, priority)
+        cleanup_task_resources(current);
 
         // Schedule away to the next ready task
+        schedule(frame);
+    }
+}
+
+/// Handle SYS_EXIT syscall: gracefully terminate the current task.
+/// Unlike fault_current_task(), sets state to Exited (no auto-restart).
+pub fn sys_exit(frame: &mut TrapFrame, exit_code: u64) {
+    // SAFETY: Single-core kernel, interrupts masked during kernel execution. No concurrent access on uniprocessor QEMU virt.
+    unsafe {
+        let current = *CURRENT.get();
+        let id = (*TCBS.get_mut())[current].id;
+
+        uart_print("[AegisOS] task ");
+        crate::uart_print_dec(id as u64);
+        uart_print(" exited (code=");
+        crate::uart_print_dec(exit_code);
+        uart_print(")\n");
+
+        (*TCBS.get_mut())[current].state = TaskState::Exited;
+
+        // Cleanup all task resources (IPC, grants, IRQ, watchdog, priority)
+        cleanup_task_resources(current);
+
+        // Schedule away — Exited tasks are never auto-restarted
         schedule(frame);
     }
 }
@@ -394,7 +434,11 @@ pub fn epoch_reset() {
     unsafe {
         *EPOCH_TICKS.get_mut() = 0;
         for i in 0..NUM_TASKS {
-            (*TCBS.get_mut())[i].ticks_used = 0;
+            if (*TCBS.get_mut())[i].state != TaskState::Inactive
+                && (*TCBS.get_mut())[i].state != TaskState::Exited
+            {
+                (*TCBS.get_mut())[i].ticks_used = 0;
+            }
         }
     }
 }
@@ -411,8 +455,11 @@ pub fn watchdog_scan() {
             if hb == 0 {
                 continue; // watchdog disabled for this task
             }
-            if (*TCBS.get_mut())[i].state == TaskState::Faulted || (*TCBS.get_mut())[i].state == TaskState::Inactive {
-                continue; // already faulted or inactive
+            if (*TCBS.get_mut())[i].state == TaskState::Faulted
+                || (*TCBS.get_mut())[i].state == TaskState::Inactive
+                || (*TCBS.get_mut())[i].state == TaskState::Exited
+            {
+                continue; // already faulted, inactive, or exited
             }
             let elapsed = now.wrapping_sub((*TCBS.get_mut())[i].last_heartbeat);
             if elapsed > hb {
@@ -669,5 +716,10 @@ mod kani_proofs {
             restart_task_pure(TaskState::Inactive, entry_point, user_stack_top, base_priority, now);
         assert!(!did5, "Inactive task should not restart");
         assert_eq!(s5, TaskState::Inactive, "state unchanged");
+
+        let (s6, _, _, _, _, _, _, did6) =
+            restart_task_pure(TaskState::Exited, entry_point, user_stack_top, base_priority, now);
+        assert!(!did6, "Exited task should not restart");
+        assert_eq!(s6, TaskState::Exited, "state unchanged");
     }
 }

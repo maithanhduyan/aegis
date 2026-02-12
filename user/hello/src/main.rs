@@ -1,58 +1,26 @@
-// AegisOS User Task — "hello" ELF demo (Phase L5)
+// AegisOS User Task — "hello" ELF demo (Phase L5 → O2 refactored)
 //
-// Minimal EL0 task that proves end-to-end ELF loading:
-//   1. Built as a separate Cargo crate → ELF64 binary
-//   2. Embedded in kernel via include_bytes!
-//   3. Loaded by kernel's ELF loader into .elf_load pages
-//   4. Runs at EL0 with USER_CODE_PAGE permissions
-//   5. Communicates with kernel via syscalls only
+// Minimal EL0 task that proves end-to-end ELF loading.
+// Uses libsyscall for all syscall wrappers (single source of truth).
 
 #![no_std]
 #![no_main]
 
 use core::panic::PanicInfo;
-
-// ─── Syscall wrappers (duplicated — user binary has no access to kernel crate) ──
-
-/// SYS_WRITE (syscall #4): write string to UART via kernel.
-#[inline(always)]
-fn syscall_write(buf: *const u8, len: usize) {
-    unsafe {
-        core::arch::asm!(
-            "svc #0",
-            in("x0") buf as u64,
-            in("x1") len as u64,
-            in("x7") 4u64,
-            options(nomem, nostack)
-        );
-    }
-}
-
-/// SYS_YIELD (syscall #0): voluntarily yield the CPU.
-#[inline(always)]
-fn syscall_yield() {
-    unsafe {
-        core::arch::asm!(
-            "mov x7, #0",
-            "svc #0",
-            out("x7") _,
-            options(nomem, nostack)
-        );
-    }
-}
+use libsyscall::{print, syscall_yield, syscall_exit};
 
 // ─── Entry point ───────────────────────────────────────────────────
 
-/// User task entry — prints "L5:ELF " then yields in a loop.
-/// This function is the ELF entry point (_start).
+/// User task entry — prints "L5:ELF ", yields a few times, then exits gracefully.
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
-    let msg = b"L5:ELF ";
-    syscall_write(msg.as_ptr(), msg.len());
-    loop {
-        syscall_yield();
-    }
+    print("L5:ELF ");
+    // Yield a few times to show task is alive
+    syscall_yield();
+    syscall_yield();
+    // Graceful exit — kernel should log "task 2 exited (code=0)"
+    syscall_exit(0);
 }
 
 #[panic_handler]

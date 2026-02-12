@@ -413,9 +413,9 @@ pub extern "C" fn kernel_main() -> ! {
     sched::init(&[
         uart_driver_entry as *const () as u64,  // task 0: UART driver
         client_entry as *const () as u64,        // task 1: client
-        0,                                        // task 2: reserved (Inactive)
-        0,                                        // task 3: reserved (Inactive)
-        0,                                        // task 4: reserved (Inactive)
+        idle_entry as *const () as u64,           // task 2: placeholder (ELF overrides)
+        idle_entry as *const () as u64,           // task 3: placeholder (ELF overrides)
+        idle_entry as *const () as u64,           // task 4: placeholder (ELF overrides)
         0,                                        // task 5: reserved (Inactive)
         0,                                        // task 6: reserved (Inactive)
         idle_entry as *const () as u64,           // task 7: idle (IDLE_TASK_ID)
@@ -451,16 +451,34 @@ pub extern "C" fn kernel_main() -> ! {
                 time_budget: 50,
                 heartbeat_interval: 0,
             },
-            INACTIVE, // task 2: reserved
-            INACTIVE, // task 3: reserved
-            INACTIVE, // task 4: reserved
-            INACTIVE, // task 5: reserved
-            INACTIVE, // task 6: reserved
-            // Task 7 (idle / ELF demo): runs briefly then defers
+            // Task 2 (hello): ELF-loaded, medium-high priority, basic caps
             TaskMetadata {
-                caps: CAP_YIELD | CAP_WRITE,
+                caps: CAP_WRITE | CAP_YIELD | CAP_EXIT,
                 priority: 5,
                 time_budget: 2,
+                heartbeat_interval: 0,
+            },
+            // Task 3 (sensor): ELF-loaded, IPC sender + heartbeat
+            TaskMetadata {
+                caps: CAP_IPC_SEND_EP1 | CAP_WRITE | CAP_YIELD | CAP_HEARTBEAT | CAP_EXIT,
+                priority: 4,
+                time_budget: 10,
+                heartbeat_interval: 0,
+            },
+            // Task 4 (logger): ELF-loaded, IPC receiver + writer
+            TaskMetadata {
+                caps: CAP_IPC_RECV_EP1 | CAP_WRITE | CAP_YIELD | CAP_EXIT,
+                priority: 3,
+                time_budget: 10,
+                heartbeat_interval: 0,
+            },
+            INACTIVE, // task 5: reserved
+            INACTIVE, // task 6: reserved
+            // Task 7 (idle): pure wfi loop, minimal caps, lowest priority
+            TaskMetadata {
+                caps: CAP_YIELD,
+                priority: 0,
+                time_budget: 0,
                 heartbeat_interval: 0,
             },
         ];
@@ -495,91 +513,49 @@ pub extern "C" fn kernel_main() -> ! {
 
     // ─── Phase L3: ELF64 Parser ────────────────────────────────────
     uart_print("[AegisOS] ELF64 parser ready\n");
-    // ─── Phase L4/L5: ELF Loader + Demo Binary ─────────────────────────
+    // ─── Phase O: Multi-ELF Loader ─────────────────────────────────────
     uart_print("[AegisOS] ELF loader ready\n");
     {
-        extern "C" {
-            static __elf_load_start: u8;
-            static __elf_load_end: u8;
-        }
-        // SAFETY: Linker-provided symbols marking ELF load region boundaries.
-        let load_base = unsafe { &__elf_load_start as *const u8 as u64 };
-        // SAFETY: Linker-provided symbols marking ELF load region boundaries.
-        let load_size = unsafe {
-            (&__elf_load_end as *const u8 as u64) - load_base
-        } as usize;
+        // Embed user-space ELF binaries (built separately via user/ workspace)
+        static HELLO_ELF: &[u8] = include_bytes!("../user/target/aarch64-user/release/hello");
+        static SENSOR_ELF: &[u8] = include_bytes!("../user/target/aarch64-user/release/sensor");
+        static LOGGER_ELF: &[u8] = include_bytes!("../user/target/aarch64-user/release/logger");
 
-        // Phase L5: embed real user-space ELF binary (built separately)
-        static USER_ELF: &[u8] = include_bytes!("../user/hello/target/aarch64-user/release/hello");
+        // Compile-time size check: each binary must fit in 16 KiB slot
+        const _: () = assert!(HELLO_ELF.len() <= 16 * 1024, "hello ELF > 16 KiB");
+        const _: () = assert!(SENSOR_ELF.len() <= 16 * 1024, "sensor ELF > 16 KiB");
+        const _: () = assert!(LOGGER_ELF.len() <= 16 * 1024, "logger ELF > 16 KiB");
 
-        // Parse the embedded ELF
-        if let Ok(info) = aegis_os::elf::parse_elf64(USER_ELF) {
-            // SAFETY: Linker-provided symbols marking ELF load region boundaries.
-            let dest = unsafe { &__elf_load_start as *const u8 as *mut u8 };
-            // SAFETY: dest points to __elf_load_start with load_size bytes writable (linker.ld .elf_load section).
-            let result = unsafe {
-                aegis_os::elf::load_elf_segments(USER_ELF, &info, dest, load_base, load_size)
-            };
-            if let Ok(entry) = result {
-                // Cache maintenance: flush D-cache, invalidate I-cache
-                // SAFETY: Cache maintenance required after loading code. dc cvau flushes D-cache, ic iallu invalidates I-cache.
-                unsafe {
-                    let mut addr = load_base;
-                    let end = load_base + load_size as u64;
-                    while addr < end {
-                        core::arch::asm!(
-                            "dc cvau, {addr}",
-                            addr = in(reg) addr,
-                            options(nomem, nostack)
-                        );
-                        addr += 64;
-                    }
-                    core::arch::asm!(
-                        "dsb ish",
-                        "ic iallu",
-                        "dsb ish",
-                        "isb",
-                        options(nomem, nostack)
-                    );
+        // (task_id, slot, elf_data, name)
+        let tasks: [(usize, usize, &[u8], &str); 3] = [
+            (2, 0, HELLO_ELF,  "hello"),
+            (3, 1, SENSOR_ELF, "sensor"),
+            (4, 2, LOGGER_ELF, "logger"),
+        ];
+
+        for &(task_id, slot, elf_data, name) in &tasks {
+            // SAFETY: boot-time, single-core, .elf_load region is writable.
+            match unsafe { aegis_os::elf::load_elf_to_task(task_id, slot, elf_data) } {
+                Ok(entry) => {
+                    uart_print("[AegisOS] task ");
+                    aegis_os::uart_print_dec(task_id as u64);
+                    uart_print(" (");
+                    uart_print(name);
+                    uart_print(") loaded from ELF (entry=0x");
+                    aegis_os::uart_print_hex(entry);
+                    uart_print(")\n");
                 }
-                // Set page permissions per segment
-                // SAFETY: IDLE_TASK_ID is valid, vaddr from validated ELF segments.
-                unsafe {
-                    use aegis_os::mmu;
-                    for i in 0..info.num_segments {
-                        if let Some(seg) = info.segments[i] {
-                            let template = if seg.flags & aegis_os::elf::PF_X != 0 {
-                                mmu::USER_CODE_PAGE
-                            } else if seg.flags & aegis_os::elf::PF_W != 0 {
-                                mmu::USER_DATA_PAGE
-                            } else {
-                                mmu::KERNEL_RODATA_PAGE
-                            };
-                            let seg_start = seg.vaddr & !0xFFF;
-                            let seg_end = (seg.vaddr + seg.memsz + 0xFFF) & !0xFFF;
-                            let mut page = seg_start;
-                            while page < seg_end {
-                                mmu::set_page_attr(sched::IDLE_TASK_ID, page, template);
-                                page += 4096;
-                            }
-                        }
-                    }
+                Err(e) => {
+                    uart_print("!!! ELF load failed for ");
+                    uart_print(name);
+                    uart_print(": ");
+                    uart_print(e);
+                    uart_print("\n");
                 }
-                // Override idle task with ELF-loaded entry point
-                // SAFETY: Single-core kernel, called during boot. Idle task not yet running.
-                unsafe {
-                    (*sched::TCBS.get_mut())[sched::IDLE_TASK_ID].entry_point = entry;
-                    (*sched::TCBS.get_mut())[sched::IDLE_TASK_ID].context.elr_el1 = entry;
-                }
-                uart_print("[AegisOS] task ");
-                aegis_os::uart_print_dec(sched::IDLE_TASK_ID as u64);
-                uart_print(" loaded from ELF (entry=0x");
-                aegis_os::uart_print_hex(entry);
-                uart_print(")\n");
-                uart_print("[AegisOS] client task loaded from ELF binary\n");
             }
         }
     }
+    uart_print("[AegisOS] multi-ELF loading complete\n");
     timer::init(10);
 
     uart_print("[AegisOS] enhanced panic handler ready\n");

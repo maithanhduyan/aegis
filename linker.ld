@@ -72,13 +72,14 @@ SECTIONS
     }
     __grant_pages_end = .;
 
-    /* === ELF Load Region (3 × 4KB = 12 KiB, fixed address for user binary linkage) === */
-    /* Writable pages for loading ELF binary segments (Phase L4/L5) */
-    /* Fixed at 0x4010_0000 so user binaries can link at a known address */
+    /* === ELF Load Region (6 × 16 KiB = 96 KiB, fixed address for user binary linkage) === */
+    /* Writable pages for loading ELF binary segments (Phase O: multi-ELF) */
+    /* Fixed at 0x4010_0000. Each of 6 task slots gets 16 KiB at known offsets. */
+    /* SYNC: size must equal platform::ELF_LOAD_SIZE_PER_TASK × platform::MAX_ELF_TASKS */
     . = 0x40100000;
     __elf_load_start = .;
     .elf_load (NOLOAD) : {
-        . += 3 * 4096;
+        . += 6 * 16 * 1024;
     }
     __elf_load_end = .;
 

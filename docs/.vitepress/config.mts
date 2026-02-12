@@ -65,6 +65,7 @@ export default defineConfig({
             { text: 'L — Arch Separation & ELF Loader', link: '/plan/12-plan-arch-separation-elf-loader_2026-02-12_15-00' },
             { text: 'M — Safety Assurance Foundation', link: '/plan/13-plan-phase-m-safety-assurance_2026-02-12_20-00' },
             { text: 'N — Scale & Verify', link: '/plan/14-plan-phase-n-scale-and-verify_2026-02-12_23-00' },
+            { text: 'O — Multi-ELF & User Ecosystem', link: '/plan/15-plan-phase-o-multi-elf-user-ecosystem_2026-02-12_23-30' },
           ],
         },
       ],

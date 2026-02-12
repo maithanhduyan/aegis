@@ -345,3 +345,111 @@ pub unsafe fn load_elf_segments(
 
     Ok(info.entry)
 }
+
+// ─── Phase O: Multi-ELF loader helper ──────────────────────────────
+
+/// Load an ELF binary into a specific task slot.
+///
+/// This is the high-level entry point for multi-ELF loading:
+///   1. Parses the ELF binary
+///   2. Copies segments into the task's load region
+///   3. Flushes caches (AArch64 only)
+///   4. Sets page permissions per segment
+///   5. Updates the task's TCB entry point and ELR
+///
+/// # Parameters
+/// - `task_id`: target task (must be in range [ELF_FIRST_TASK_ID, NUM_TASKS))
+/// - `slot`: ELF slot index (0-based, determines load address)
+/// - `elf_data`: raw ELF binary bytes
+///
+/// # Returns
+/// Entry point address on success, or a static error string.
+///
+/// # Safety
+/// Must be called during boot before interrupts are enabled.
+/// `slot` must be < MAX_ELF_TASKS.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn load_elf_to_task(
+    task_id: usize,
+    slot: usize,
+    elf_data: &[u8],
+) -> Result<u64, &'static str> {
+    use crate::platform::qemu_virt::{elf_load_addr, ELF_LOAD_SIZE_PER_TASK, MAX_ELF_TASKS};
+    use crate::kernel::sched;
+
+    if slot >= MAX_ELF_TASKS {
+        return Err("slot >= MAX_ELF_TASKS");
+    }
+    if task_id >= sched::NUM_TASKS {
+        return Err("task_id >= NUM_TASKS");
+    }
+
+    let load_base = elf_load_addr(slot);
+    let load_size = ELF_LOAD_SIZE_PER_TASK;
+
+    // 1. Parse ELF
+    let info = parse_elf64(elf_data).map_err(|_| "ELF parse failed")?;
+
+    // 2. Load segments into memory
+    let dest = load_base as *mut u8;
+    // SAFETY: dest points to .elf_load region (linker.ld), size = ELF_LOAD_SIZE_PER_TASK.
+    let entry = unsafe {
+        load_elf_segments(elf_data, &info, dest, load_base, load_size)
+            .map_err(|_| "ELF load failed")?
+    };
+
+    // 3. Cache maintenance: flush D-cache, invalidate I-cache
+    // SAFETY: Required after loading code to maintain coherence.
+    unsafe {
+        let mut addr = load_base;
+        let end = load_base + load_size as u64;
+        while addr < end {
+            core::arch::asm!(
+                "dc cvau, {addr}",
+                addr = in(reg) addr,
+                options(nomem, nostack)
+            );
+            addr += 64;
+        }
+        core::arch::asm!(
+            "dsb ish",
+            "ic iallu",
+            "dsb ish",
+            "isb",
+            options(nomem, nostack)
+        );
+    }
+
+    // 4. Set page permissions per segment
+    // SAFETY: task_id validated, vaddr from validated ELF segments.
+    unsafe {
+        use crate::mmu;
+        for i in 0..info.num_segments {
+            if let Some(seg) = info.segments[i] {
+                let template = if seg.flags & PF_X != 0 {
+                    mmu::USER_CODE_PAGE
+                } else if seg.flags & PF_W != 0 {
+                    mmu::USER_DATA_PAGE
+                } else {
+                    mmu::KERNEL_RODATA_PAGE
+                };
+                let seg_start = seg.vaddr & !0xFFF;
+                let seg_end = (seg.vaddr + seg.memsz + 0xFFF) & !0xFFF;
+                let mut page = seg_start;
+                while page < seg_end {
+                    mmu::set_page_attr(task_id, page, template);
+                    page += 4096;
+                }
+            }
+        }
+    }
+
+    // 5. Update TCB entry point and ELR
+    // SAFETY: Single-core kernel, called during boot.
+    unsafe {
+        (*sched::TCBS.get_mut())[task_id].entry_point = entry;
+        (*sched::TCBS.get_mut())[task_id].context.elr_el1 = entry;
+    }
+
+    Ok(entry)
+}

@@ -411,6 +411,8 @@ fn handle_svc(frame: &mut TrapFrame, _esr: u64) {
         11 => handle_device_map(frame),
         // SYS_HEARTBEAT = 12: register watchdog heartbeat (x0=interval in ticks)
         12 => handle_heartbeat(frame),
+        // SYS_EXIT = 13: graceful task exit (x0=exit_code)
+        13 => crate::sched::sys_exit(frame, frame.x[0]),
         _ => {
             uart_print("!!! unknown syscall #");
             uart_print_hex(syscall_nr);

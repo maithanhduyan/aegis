@@ -31,6 +31,7 @@ use aegis_os::cap::{
     CAP_IRQ_BIND, CAP_IRQ_ACK,
     CAP_DEVICE_MAP,
     CAP_HEARTBEAT,
+    CAP_EXIT,
     CAP_ALL, CAP_NONE,
 };
 use aegis_os::grant::{self, EMPTY_GRANT, MAX_GRANTS};
@@ -3349,4 +3350,118 @@ fn klog_macro_compiles() {
         // Debug level (3) > LOG_LEVEL (2) → should be compiled out
         aegis_os::klog!(LogLevel::Debug, "this should be eliminated");
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase O3: SYS_EXIT + TaskState::Exited tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn task_state_exited_value() {
+    assert_eq!(TaskState::Exited as u8, 5);
+}
+
+#[test]
+fn task_state_exited_distinct() {
+    // Exited must be distinct from all other states
+    assert_ne!(TaskState::Exited, TaskState::Inactive);
+    assert_ne!(TaskState::Exited, TaskState::Ready);
+    assert_ne!(TaskState::Exited, TaskState::Running);
+    assert_ne!(TaskState::Exited, TaskState::Blocked);
+    assert_ne!(TaskState::Exited, TaskState::Faulted);
+}
+
+#[test]
+fn cap_exit_bit_18() {
+    assert_eq!(CAP_EXIT, 1 << 18);
+}
+
+#[test]
+fn cap_exit_in_cap_all() {
+    assert!(cap::cap_check(CAP_ALL, CAP_EXIT));
+}
+
+#[test]
+fn cap_for_syscall_exit() {
+    // SYS_EXIT = 13 requires CAP_EXIT
+    assert_eq!(cap::cap_for_syscall(13, 0), CAP_EXIT);
+    assert_eq!(cap::cap_for_syscall(13, 1), CAP_EXIT);
+}
+
+#[test]
+fn cap_name_exit() {
+    assert_eq!(cap::cap_name(CAP_EXIT), "EXIT");
+}
+
+#[test]
+fn exited_task_not_auto_restarted() {
+    // After setting a task to Exited, the scheduler's auto-restart logic
+    // should NOT restart it (only Faulted tasks get restarted).
+    unsafe {
+        reset_test_state();
+        (*sched::TCBS.get_mut())[1].state = TaskState::Exited;
+        (*sched::TCBS.get_mut())[1].fault_tick = 0;
+
+        // Simulate time passing well beyond RESTART_DELAY_TICKS
+        *aegis_os::timer::TICK_COUNT.get_mut() = RESTART_DELAY_TICKS + 100;
+
+        // Call restart_task — should be a no-op for Exited
+        sched::restart_task(1);
+        assert_eq!(
+            (*sched::TCBS.get_mut())[1].state,
+            TaskState::Exited,
+            "Exited task must NOT be auto-restarted"
+        );
+    }
+}
+
+#[test]
+fn exited_task_skipped_by_scheduler() {
+    // An Exited task should never be picked by the scheduler.
+    unsafe {
+        reset_test_state();
+        // Make task 0 Running (current)
+        (*sched::TCBS.get_mut())[0].state = TaskState::Running;
+        (*sched::TCBS.get_mut())[0].priority = 1;
+        *sched::CURRENT.get_mut() = 0;
+
+        // Make task 1 Exited with high priority — should be skipped
+        (*sched::TCBS.get_mut())[1].state = TaskState::Exited;
+        (*sched::TCBS.get_mut())[1].priority = 7;
+
+        // Make task 2 Ready with lower priority
+        (*sched::TCBS.get_mut())[2].state = TaskState::Ready;
+        (*sched::TCBS.get_mut())[2].priority = 3;
+
+        // Make idle task available
+        (*sched::TCBS.get_mut())[IDLE_TASK_ID].state = TaskState::Ready;
+        (*sched::TCBS.get_mut())[IDLE_TASK_ID].priority = 0;
+
+        let mut frame = TrapFrame {
+            x: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, _pad: [0; 2],
+        };
+        sched::schedule(&mut frame);
+
+        // Should pick task 2 (Ready, prio 3), NOT task 1 (Exited, prio 7)
+        assert_eq!(
+            unsafe { *sched::CURRENT.get() }, 2,
+            "Scheduler must skip Exited tasks"
+        );
+    }
+}
+
+#[test]
+fn cap_exit_denied_without_cap() {
+    // A task without CAP_EXIT should fail the cap check for SYS_EXIT
+    let caps_no_exit = CAP_WRITE | CAP_YIELD;
+    let required = cap::cap_for_syscall(13, 0);
+    assert!(!cap::cap_check(caps_no_exit, required));
+}
+
+#[test]
+fn cap_exit_granted_with_cap() {
+    // A task with CAP_EXIT should pass the cap check for SYS_EXIT
+    let caps_with_exit = CAP_WRITE | CAP_YIELD | CAP_EXIT;
+    let required = cap::cap_for_syscall(13, 0);
+    assert!(cap::cap_check(caps_with_exit, required));
 }

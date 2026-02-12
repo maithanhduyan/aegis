@@ -277,3 +277,202 @@ pub fn cleanup_task(task_idx: usize) {
         }
     }
 }
+
+// ─── Pure functions for Kani verification ──────────────────────────
+
+/// Pure copy_message: copy MSG_REGS elements from src to dst array.
+/// Mirrors copy_message() but operates on explicit arrays.
+#[cfg(kani)]
+fn copy_message_pure(src: &[u64; MSG_REGS], dst: &[u64; MSG_REGS]) -> [u64; MSG_REGS] {
+    let mut out = *dst;
+    let mut i = 0;
+    while i < MSG_REGS {
+        out[i] = src[i];
+        i += 1;
+    }
+    out
+}
+
+/// Pure cleanup: remove task_id from all sender queues and receiver slots.
+/// Mirrors cleanup_task() but operates on explicit endpoint state.
+#[cfg(kani)]
+fn cleanup_pure(
+    sender_tasks: &mut [[usize; MAX_WAITERS]; MAX_ENDPOINTS],
+    sender_heads: &mut [usize; MAX_ENDPOINTS],
+    sender_counts: &mut [usize; MAX_ENDPOINTS],
+    receivers: &mut [Option<usize>; MAX_ENDPOINTS],
+    task_id: usize,
+) {
+    let mut ep = 0;
+    while ep < MAX_ENDPOINTS {
+        // Remove from sender queue (inline remove logic)
+        let old_count = sender_counts[ep];
+        let old_head = sender_heads[ep];
+        let mut new_tasks = [0usize; MAX_WAITERS];
+        let mut new_count = 0usize;
+        let mut i = 0;
+        while i < old_count {
+            let idx = (old_head + i) % MAX_WAITERS;
+            if sender_tasks[ep][idx] != task_id {
+                new_tasks[new_count] = sender_tasks[ep][idx];
+                new_count += 1;
+            }
+            i += 1;
+        }
+        sender_tasks[ep] = new_tasks;
+        sender_heads[ep] = 0;
+        sender_counts[ep] = new_count;
+
+        // Remove from receiver slot
+        if receivers[ep] == Some(task_id) {
+            receivers[ep] = None;
+        }
+
+        ep += 1;
+    }
+}
+
+// ─── Kani formal verification proofs ───────────────────────────────
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Proof 1: SenderQueue overflow safety.
+    /// For all sequences of push/pop on SenderQueue (MAX_WAITERS=4):
+    /// - push when full → returns false (no corruption)
+    /// - pop when empty → returns None (no panic)
+    /// - count is always in [0, MAX_WAITERS]
+    /// - head is always in [0, MAX_WAITERS)
+    #[kani::proof]
+    #[kani::unwind(5)] // MAX_WAITERS=4, need 5 iterations
+    fn ipc_queue_no_overflow() {
+        let mut q = SenderQueue::new();
+
+        // Push up to MAX_WAITERS elements — all should succeed
+        let mut i: usize = 0;
+        while i < MAX_WAITERS {
+            let task: usize = kani::any();
+            let ok = q.push(task);
+            assert!(ok, "push should succeed when count < MAX_WAITERS");
+            assert!(q.count == i + 1, "count should increment");
+            assert!(q.count <= MAX_WAITERS, "count must not exceed MAX_WAITERS");
+            assert!(q.head < MAX_WAITERS, "head must be valid index");
+            i += 1;
+        }
+
+        // Queue is full — next push must fail
+        let extra: usize = kani::any();
+        let overflow = q.push(extra);
+        assert!(!overflow, "push when full must return false");
+        assert!(q.count == MAX_WAITERS, "count must stay at MAX_WAITERS after failed push");
+
+        // Pop all elements — should succeed
+        let mut j: usize = 0;
+        while j < MAX_WAITERS {
+            let result = q.pop();
+            assert!(result.is_some(), "pop should succeed when count > 0");
+            assert!(q.count == MAX_WAITERS - 1 - j, "count should decrement");
+            assert!(q.head < MAX_WAITERS, "head must remain valid");
+            j += 1;
+        }
+
+        // Queue is empty — pop must return None
+        let empty = q.pop();
+        assert!(empty.is_none(), "pop when empty must return None");
+        assert!(q.count == 0, "count must be 0 after draining");
+    }
+
+    /// Proof 2: IPC message integrity.
+    /// For all message payloads (x0–x3), copy_message_pure transfers
+    /// the exact values from sender to receiver without corruption.
+    #[kani::proof]
+    fn ipc_message_integrity() {
+        let src: [u64; MSG_REGS] = [kani::any(), kani::any(), kani::any(), kani::any()];
+        let dst: [u64; MSG_REGS] = [kani::any(), kani::any(), kani::any(), kani::any()];
+
+        let result = copy_message_pure(&src, &dst);
+
+        // Every register must match the source exactly
+        assert_eq!(result[0], src[0], "x0 must match sender");
+        assert_eq!(result[1], src[1], "x1 must match sender");
+        assert_eq!(result[2], src[2], "x2 must match sender");
+        assert_eq!(result[3], src[3], "x3 must match sender");
+
+        // Original source must be unmodified
+        // (Rust borrow rules guarantee this, but Kani confirms the logic)
+    }
+
+    /// Proof 3: Cleanup completeness.
+    /// For all task_id ∈ [0, NUM_TASKS), after cleanup_pure:
+    /// - No sender queue in any endpoint contains task_id
+    /// - No receiver slot in any endpoint references task_id
+    #[kani::proof]
+    #[kani::unwind(5)] // MAX_ENDPOINTS=4, MAX_WAITERS=4
+    fn ipc_cleanup_completeness() {
+        let task_id: usize = kani::any();
+        kani::assume(task_id < sched::NUM_TASKS);
+
+        // Set up symbolic endpoint state
+        let mut sender_tasks = [[0usize; MAX_WAITERS]; MAX_ENDPOINTS];
+        let mut sender_heads = [0usize; MAX_ENDPOINTS];
+        let mut sender_counts = [0usize; MAX_ENDPOINTS];
+        let mut receivers = [None::<usize>; MAX_ENDPOINTS];
+
+        // Initialize with constrained symbolic values
+        let mut ep = 0;
+        while ep < MAX_ENDPOINTS {
+            sender_counts[ep] = kani::any();
+            kani::assume(sender_counts[ep] <= MAX_WAITERS);
+            sender_heads[ep] = kani::any();
+            kani::assume(sender_heads[ep] < MAX_WAITERS);
+
+            let mut w = 0;
+            while w < MAX_WAITERS {
+                sender_tasks[ep][w] = kani::any();
+                kani::assume(sender_tasks[ep][w] < sched::NUM_TASKS);
+                w += 1;
+            }
+
+            let has_recv: bool = kani::any();
+            if has_recv {
+                let recv_id: usize = kani::any();
+                kani::assume(recv_id < sched::NUM_TASKS);
+                receivers[ep] = Some(recv_id);
+            }
+
+            ep += 1;
+        }
+
+        // Perform cleanup
+        cleanup_pure(
+            &mut sender_tasks,
+            &mut sender_heads,
+            &mut sender_counts,
+            &mut receivers,
+            task_id,
+        );
+
+        // Verify: task_id is NOT in any sender queue
+        let mut ep2 = 0;
+        while ep2 < MAX_ENDPOINTS {
+            let mut i = 0;
+            while i < sender_counts[ep2] {
+                let idx = (sender_heads[ep2] + i) % MAX_WAITERS;
+                assert!(
+                    sender_tasks[ep2][idx] != task_id,
+                    "cleanup must remove task from all sender queues"
+                );
+                i += 1;
+            }
+
+            // Verify: task_id is NOT a receiver
+            assert!(
+                receivers[ep2] != Some(task_id),
+                "cleanup must remove task from all receiver slots"
+            );
+
+            ep2 += 1;
+        }
+    }
+}

@@ -61,6 +61,14 @@ at_el1:
     ldr x0, =__stack_end
     mov sp, x0
 
+    /* CPACR_EL1.FPEN = 0b01 (bits [21:20]):
+       Allow FP/SIMD at EL1 (compiler may generate NEON for memcpy),
+       trap FP/SIMD at EL0 (user tasks must not use floating point).
+       AArch64 ABI requires NEON, so kernel code needs it enabled. */
+    mov x0, #(1 << 20)
+    msr cpacr_el1, x0
+    isb
+
     /* Clear BSS + page tables */
     /* Xóa BSS + bảng trang */
     ldr x0, =__bss_start

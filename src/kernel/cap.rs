@@ -51,6 +51,8 @@ pub const CAP_IRQ_ACK: CapBits = 1 << 15;
 pub const CAP_DEVICE_MAP: CapBits = 1 << 16;
 /// Permission to register watchdog heartbeat (SYS_HEARTBEAT)
 pub const CAP_HEARTBEAT: CapBits = 1 << 17;
+/// Permission to call SYS_EXIT for graceful task termination
+pub const CAP_EXIT: CapBits = 1 << 18;
 
 // ─── Convenience combos ────────────────────────────────────────────
 
@@ -72,7 +74,8 @@ pub const CAP_ALL: CapBits = CAP_IPC_SEND_EP0
     | CAP_IRQ_BIND
     | CAP_IRQ_ACK
     | CAP_DEVICE_MAP
-    | CAP_HEARTBEAT;
+    | CAP_HEARTBEAT
+    | CAP_EXIT;
 
 /// No capabilities
 pub const CAP_NONE: CapBits = 0;
@@ -139,6 +142,8 @@ pub fn cap_for_syscall(syscall_nr: u64, ep_id: u64) -> CapBits {
         11 => CAP_DEVICE_MAP,
         // SYS_HEARTBEAT = 12
         12 => CAP_HEARTBEAT,
+        // SYS_EXIT = 13
+        13 => CAP_EXIT,
         // Unknown syscall — no valid cap
         _ => 0,
     }
@@ -166,6 +171,7 @@ pub fn cap_name(cap: CapBits) -> &'static str {
         CAP_IRQ_ACK       => "IRQ_ACK",
         CAP_DEVICE_MAP    => "DEVICE_MAP",
         CAP_HEARTBEAT     => "HEARTBEAT",
+        CAP_EXIT          => "EXIT",
         CAP_ALL           => "ALL",
         CAP_NONE          => "NONE",
         _                 => "UNKNOWN",
@@ -206,7 +212,7 @@ mod kani_proofs {
     fn cap_for_syscall_no_panic_and_bounded() {
         let nr: u64 = kani::any();
         let ep: u64 = kani::any();
-        kani::assume(nr <= 12);
+        kani::assume(nr <= 13);
         kani::assume(ep <= 3);
 
         let result = cap_for_syscall(nr, ep);

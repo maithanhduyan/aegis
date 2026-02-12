@@ -1,8 +1,8 @@
 [package]
-name = "hello"
+name = "sensor"
 version = "0.1.0"
 edition = "2021"
-description = "AegisOS L5 demo — minimal EL0 task loaded from ELF"
+description = "AegisOS Phase O — simulated sensor task (sends IPC data)"
 
 [dependencies]
 libsyscall = { path = "../libsyscall" }

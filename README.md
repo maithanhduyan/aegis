@@ -30,7 +30,10 @@ AegisOS is a `#![no_std]` Rust microkernel targeting QEMU `virt` machine (Cortex
 | Watchdog | ✅ | K | Heartbeat monitoring, fault on timeout |
 | Arch Separation | ✅ | L | `arch/aarch64/` + `kernel/` + `platform/` modular structure |
 | ELF64 Loader | ✅ | L | Parse + load ELF binaries, W^X enforced, `include_bytes!` embed |
-| Test Infrastructure | ✅ | F–L | 189 host unit tests + 25 QEMU boot checkpoints |
+| Multi-ELF Loading | ✅ | O | 6 ELF slots (16 KiB each), `load_elf_to_task()`, `const_assert!` |
+| libsyscall | ✅ | O | Shared syscall library for all user binaries — single source of truth |
+| SYS_EXIT | ✅ | O | Graceful task exit, `TaskState::Exited`, `cleanup_task_resources()` |
+| Test Infrastructure | ✅ | F–O | 189+ host unit tests + 25+ QEMU boot checkpoints |
 | CI/CD | ✅ | F | GitHub Actions — host tests + QEMU integration on every push |
 
 ## 📐 Architecture
@@ -125,11 +128,18 @@ rustup show   # verifies nightly is active
 
 ### Build
 
+Phase O requires building user crates first, then kernel:
+
 ```bash
-cargo build --release \
-  -Zjson-target-spec \
-  -Zbuild-std=core \
-  -Zbuild-std-features=compiler-builtins-mem
+# 1. Build user crates (libsyscall + hello + sensor + logger)
+cd user && cargo build --release -Zjson-target-spec
+
+# 2. Build kernel (embeds user binaries via include_bytes!)
+cargo build --release -Zjson-target-spec
+
+# Or use the convenience script:
+./scripts/build-all.sh       # Linux/macOS
+.\scripts\build-all.ps1      # Windows PowerShell
 ```
 
 Output: `target/aarch64-aegis/release/aegis_os`
@@ -251,6 +261,7 @@ GitHub Actions runs both test suites on every push to `main`/`develop`:
 | 10 | `SYS_IRQ_ACK` | Acknowledge IRQ, re-enable INTID | J |
 | 11 | `SYS_DEVICE_MAP` | Map device MMIO into user-space | J |
 | 12 | `SYS_HEARTBEAT` | Register/refresh watchdog heartbeat | K |
+| 13 | `SYS_EXIT` | Graceful task exit (cleanup + no auto-restart) | O |
 
 ## 🛡️ Design Constraints
 
