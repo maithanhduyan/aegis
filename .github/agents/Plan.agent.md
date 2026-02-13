@@ -12,10 +12,14 @@ handoffs:
     agent: agent
     prompt: Start implementation - Bắt đầu triển khai theo kế hoạch đã tạo.
     send: true
-  - label: Viết blog giải thích
+  - label: Viết blog kể chuyện
     agent: Aegis-StoryTeller
-    prompt: Viết blog giải thích các khái niệm kỹ thuật trong kế hoạch vừa tạo.
+    prompt: Viết blog kể chuyện về các khái niệm kỹ thuật trong kế hoạch vừa tạo.
     send: true
+  - label: Khởi động thảo luận
+    agent: Orchestrator-Agent
+    prompt: Tạo đề tài thảo luận với kế hoạch.
+    send: false
   - label: Viết test trước
     agent: Aegis-Tester
     prompt: Dựa trên kế hoạch, viết test cases trước khi triển khai (TDD).

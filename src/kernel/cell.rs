@@ -100,3 +100,29 @@ macro_rules! kcell_index {
         &mut (*$cell.get_mut())[$idx]
     };
 }
+
+// ─── Miri shim skeleton (Phase P) ────────────────────────────────────
+
+/// When running under Miri, KernelCell could use RefCell<T> instead of
+/// UnsafeCell<T> to get borrow-checking at runtime. However, RefCell
+/// verifies different semantics than production UnsafeCell (it checks
+/// Rust borrowing rules, not raw pointer aliasing). This shim is a
+/// placeholder for future SMP/preemptive kernel work.
+///
+/// Backlog: "Miri CI integration — needed when AegisOS has SMP or
+///          preemptive kernel (Phase Q+)"
+///
+/// Example future usage:
+/// ```ignore
+/// #[cfg(miri)]
+/// pub struct KernelCell<T>(core::cell::RefCell<T>);
+///
+/// #[cfg(miri)]
+/// impl<T> KernelCell<T> {
+///     pub const fn new(val: T) -> Self { Self(RefCell::new(val)) }
+///     pub unsafe fn get(&self) -> &T { /* borrow() */ }
+///     pub unsafe fn get_mut(&self) -> &mut T { /* borrow_mut() */ }
+/// }
+/// ```
+#[cfg(miri)]
+compile_error!("Miri support is deferred — see docs/standard/05-proof-coverage-mapping.md §Proof Limitations");

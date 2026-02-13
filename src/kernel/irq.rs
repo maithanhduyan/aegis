@@ -288,3 +288,206 @@ pub fn irq_cleanup_task(task_id: usize) {
         }
     }
 }
+
+// ─── Pure functions for Kani verification (Phase P) ────────────────
+
+/// Pure irq_bind: validate inputs, find slot, return slot index.
+/// Mirrors irq_bind() logic but operates on explicit array.
+/// Does NOT touch globals, GIC, or UART.
+// TODO(Phase-Q+): migrate to always-available when module count > 6 or pre-cert
+#[cfg(kani)]
+pub fn irq_bind_pure(
+    table: &[IrqBinding; MAX_IRQ_BINDINGS],
+    intid: u32,
+    task_id: usize,
+    notify_bit: u64,
+) -> Result<usize, u64> {
+    if intid < MIN_SPI_INTID {
+        return Err(ERR_INVALID_INTID);
+    }
+    if notify_bit == 0 {
+        return Err(ERR_INVALID_INTID);
+    }
+
+    // Check for duplicate INTID
+    let mut i: usize = 0;
+    while i < MAX_IRQ_BINDINGS {
+        if table[i].active && table[i].intid == intid {
+            return Err(ERR_ALREADY_BOUND);
+        }
+        i += 1;
+    }
+
+    // Find empty slot
+    let mut slot: Option<usize> = None;
+    let mut j: usize = 0;
+    while j < MAX_IRQ_BINDINGS {
+        if !table[j].active {
+            slot = Some(j);
+            break;
+        }
+        j += 1;
+    }
+
+    match slot {
+        Some(idx) => Ok(idx),
+        None => Err(ERR_TABLE_FULL),
+    }
+}
+
+/// Pure irq_route: find binding for INTID, return (task_id, notify_bit).
+/// Mirrors irq_route() lookup logic (no side effects).
+// TODO(Phase-Q+): migrate to always-available when module count > 6 or pre-cert
+#[cfg(kani)]
+pub fn irq_route_pure(
+    table: &[IrqBinding; MAX_IRQ_BINDINGS],
+    intid: u32,
+) -> Option<(usize, u64)> {
+    let mut i: usize = 0;
+    while i < MAX_IRQ_BINDINGS {
+        if table[i].active && table[i].intid == intid {
+            return Some((table[i].task_id, table[i].notify_bit));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Pure irq_cleanup: remove all bindings for a task.
+/// Mirrors irq_cleanup_task() logic — returns new array state.
+// TODO(Phase-Q+): migrate to always-available when module count > 6 or pre-cert
+#[cfg(kani)]
+pub fn irq_cleanup_pure(
+    table: &[IrqBinding; MAX_IRQ_BINDINGS],
+    task_id: usize,
+) -> [IrqBinding; MAX_IRQ_BINDINGS] {
+    let mut result = *table;
+    let mut i: usize = 0;
+    while i < MAX_IRQ_BINDINGS {
+        if result[i].active && result[i].task_id == task_id {
+            result[i] = EMPTY_BINDING;
+        }
+        i += 1;
+    }
+    result
+}
+
+// ─── Kani formal verification proofs (Phase P) ────────────────────
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Proof 4: Route always delivers correct (task_id, notify_bit) for bound INTID.
+    /// Constrained: intid 32–127, task_id < NUM_TASKS.
+    #[kani::proof]
+    #[kani::unwind(9)] // MAX_IRQ_BINDINGS=8, loop needs 9
+    fn irq_route_correctness() {
+        let mut table = [EMPTY_BINDING; MAX_IRQ_BINDINGS];
+
+        // Set up one known binding
+        let slot: usize = kani::any();
+        kani::assume(slot < MAX_IRQ_BINDINGS);
+        let intid: u32 = kani::any();
+        kani::assume(intid >= MIN_SPI_INTID && intid <= 127);
+        let task_id: usize = kani::any();
+        kani::assume(task_id < crate::sched::NUM_TASKS);
+        let notify_bit: u64 = kani::any();
+        kani::assume(notify_bit != 0);
+
+        table[slot] = IrqBinding {
+            intid,
+            task_id,
+            notify_bit,
+            active: true,
+            pending_ack: false,
+        };
+
+        // Route should find this binding
+        let result = irq_route_pure(&table, intid);
+        assert!(result.is_some(), "route must find bound INTID");
+        let (tid, bit) = result.unwrap();
+        assert_eq!(tid, task_id, "route must return correct task_id");
+        assert_eq!(bit, notify_bit, "route must return correct notify_bit");
+    }
+
+    /// Proof 5: After cleanup, no active binding references the cleaned task.
+    /// Constrained: task_id < NUM_TASKS, intid 32–127.
+    #[kani::proof]
+    #[kani::unwind(9)] // MAX_IRQ_BINDINGS=8, loop needs 9
+    fn irq_no_orphaned_binding() {
+        let task_id: usize = kani::any();
+        kani::assume(task_id < crate::sched::NUM_TASKS);
+
+        // Symbolic initial state (constrained)
+        let mut table = [EMPTY_BINDING; MAX_IRQ_BINDINGS];
+        let mut i: usize = 0;
+        while i < MAX_IRQ_BINDINGS {
+            table[i].active = kani::any();
+            if table[i].active {
+                table[i].intid = kani::any();
+                kani::assume(table[i].intid >= MIN_SPI_INTID && table[i].intid <= 127);
+                table[i].task_id = kani::any();
+                kani::assume(table[i].task_id < crate::sched::NUM_TASKS);
+                table[i].notify_bit = kani::any();
+                kani::assume(table[i].notify_bit != 0);
+                table[i].pending_ack = kani::any();
+            }
+            i += 1;
+        }
+
+        // Perform cleanup
+        let result = irq_cleanup_pure(&table, task_id);
+
+        // PROPERTY: no active binding references task_id
+        let mut j: usize = 0;
+        while j < MAX_IRQ_BINDINGS {
+            if result[j].active {
+                assert!(
+                    result[j].task_id != task_id,
+                    "cleanup must remove all bindings for task"
+                );
+            }
+            j += 1;
+        }
+    }
+
+    /// Proof 6: Cannot bind the same INTID twice.
+    /// Constrained: intid 32–127.
+    #[kani::proof]
+    #[kani::unwind(9)] // MAX_IRQ_BINDINGS=8, loop needs 9
+    fn irq_bind_no_duplicate_intid() {
+        let mut table = [EMPTY_BINDING; MAX_IRQ_BINDINGS];
+
+        // First bind succeeds
+        let intid: u32 = kani::any();
+        kani::assume(intid >= MIN_SPI_INTID && intid <= 127);
+        let task1: usize = kani::any();
+        kani::assume(task1 < crate::sched::NUM_TASKS);
+        let bit1: u64 = kani::any();
+        kani::assume(bit1 != 0);
+
+        let slot1 = irq_bind_pure(&table, intid, task1, bit1);
+        assert!(slot1.is_ok(), "first bind should succeed");
+        let idx1 = slot1.unwrap();
+
+        // Apply the bind
+        table[idx1] = IrqBinding {
+            intid,
+            task_id: task1,
+            notify_bit: bit1,
+            active: true,
+            pending_ack: false,
+        };
+
+        // Second bind with same INTID must fail
+        let task2: usize = kani::any();
+        kani::assume(task2 < crate::sched::NUM_TASKS);
+        let bit2: u64 = kani::any();
+        kani::assume(bit2 != 0);
+
+        let slot2 = irq_bind_pure(&table, intid, task2, bit2);
+        assert!(slot2.is_err(), "duplicate INTID bind must fail");
+        assert_eq!(slot2.unwrap_err(), ERR_ALREADY_BOUND);
+    }
+}

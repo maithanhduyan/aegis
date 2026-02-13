@@ -67,6 +67,7 @@ export default defineConfig({
             { text: 'M — Safety Assurance Foundation', link: '/plan/13-plan-phase-m-safety-assurance_2026-02-12_20-00' },
             { text: 'N — Scale & Verify', link: '/plan/14-plan-phase-n-scale-and-verify_2026-02-12_23-00' },
             { text: 'O — Multi-ELF & User Ecosystem', link: '/plan/15-plan-phase-o-multi-elf-user-ecosystem_2026-02-12_23-30' },
+            { text: 'P — Formal Verification Expansion', link: '/plan/16-plan-phase-p-formal-verification-expansion_2026-02-13_10-00' },
           ],
         },
       ],
@@ -79,13 +80,14 @@ export default defineConfig({
             { text: 'IEC 62304 — Y tế', link: '/standard/02-IEC-62304-y-te' },
             { text: 'ISO 26262 — Ô tô', link: '/standard/03-ISO-26262-o-to' },
             { text: 'DO-333 — Phương Pháp Công Thức Toán Học', link: '/standard/04-DO-333-formal-methods' },
+            { text: 'FM.A-7 — Proof Coverage Mapping', link: '/standard/05-proof-coverage-mapping' },
           ],
         },
       ],
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/example/aegis' },
+      { icon: 'github', link: 'https://github.com/maithanhduyan/aegis' },
     ],
 
     search: {

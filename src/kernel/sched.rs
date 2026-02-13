@@ -566,6 +566,36 @@ pub fn bootstrap() -> ! {
     }
 }
 
+// ─── Pure functions for Kani verification (Phase P) ────────────────
+
+/// Pure watchdog check: should a task be faulted based on heartbeat timing?
+/// Returns true if interval > 0 AND elapsed > interval.
+/// Mirrors the inner check in watchdog_scan().
+// TODO(Phase-Q+): migrate to always-available when module count > 6 or pre-cert
+#[cfg(kani)]
+pub fn watchdog_should_fault(interval: u64, elapsed: u64) -> bool {
+    interval > 0 && elapsed > interval
+}
+
+/// Pure epoch reset: zero ticks_used for all non-Inactive/Exited tasks.
+/// Returns new ticks_used array. Mirrors epoch_reset() logic.
+// TODO(Phase-Q+): migrate to always-available when module count > 6 or pre-cert
+#[cfg(kani)]
+pub fn epoch_reset_pure(
+    states: &[TaskState; NUM_TASKS],
+    ticks_used: &[u64; NUM_TASKS],
+) -> [u64; NUM_TASKS] {
+    let mut result = *ticks_used;
+    let mut i: usize = 0;
+    while i < NUM_TASKS {
+        if states[i] != TaskState::Inactive && states[i] != TaskState::Exited {
+            result[i] = 0;
+        }
+        i += 1;
+    }
+    result
+}
+
 // ─── Kani formal verification proofs ───────────────────────────────
 
 /// Pure scheduling decision — mirrors the logic in schedule() but takes
@@ -721,5 +751,75 @@ mod kani_proofs {
             restart_task_pure(TaskState::Exited, entry_point, user_stack_top, base_priority, now);
         assert!(!did6, "Exited task should not restart");
         assert_eq!(s6, TaskState::Exited, "state unchanged");
+    }
+
+    // ─── Phase P proofs: watchdog + budget ─────────────────────────
+
+    /// Proof: If a task doesn't heartbeat within its interval, watchdog detects it.
+    /// And if the task heartbeats within the interval, watchdog does NOT fault it.
+    #[kani::proof]
+    fn watchdog_violation_detection() {
+        let interval: u64 = kani::any();
+        let elapsed: u64 = kani::any();
+
+        let should_fault = watchdog_should_fault(interval, elapsed);
+
+        if interval == 0 {
+            // Watchdog disabled — never fault
+            assert!(!should_fault, "disabled watchdog must not fault");
+        } else if elapsed > interval {
+            // Violation — must fault
+            assert!(should_fault, "missed heartbeat must trigger fault");
+        } else {
+            // Within interval — must NOT fault
+            assert!(!should_fault, "timely heartbeat must not trigger fault");
+        }
+    }
+
+    /// Proof: After epoch reset, every non-Inactive/Exited task has ticks_used = 0.
+    /// Inactive and Exited tasks are unaffected.
+    #[kani::proof]
+    #[kani::unwind(9)] // NUM_TASKS=8, loop needs 9
+    fn budget_epoch_reset_fairness() {
+        let mut states = [TaskState::Inactive; NUM_TASKS];
+        let mut ticks_used = [0u64; NUM_TASKS];
+
+        // Symbolic task states and ticks
+        let mut i: usize = 0;
+        while i < NUM_TASKS {
+            let s: u8 = kani::any();
+            kani::assume(s <= 5); // TaskState variants 0..=5
+            states[i] = match s {
+                0 => TaskState::Inactive,
+                1 => TaskState::Ready,
+                2 => TaskState::Running,
+                3 => TaskState::Blocked,
+                4 => TaskState::Faulted,
+                _ => TaskState::Exited,
+            };
+            ticks_used[i] = kani::any();
+            i += 1;
+        }
+
+        let result = epoch_reset_pure(&states, &ticks_used);
+
+        // Verify properties
+        let mut j: usize = 0;
+        while j < NUM_TASKS {
+            if states[j] == TaskState::Inactive || states[j] == TaskState::Exited {
+                // PROPERTY: Inactive/Exited tasks are NOT reset
+                assert_eq!(
+                    result[j], ticks_used[j],
+                    "Inactive/Exited ticks must be preserved"
+                );
+            } else {
+                // PROPERTY: All other tasks get ticks_used = 0
+                assert_eq!(
+                    result[j], 0,
+                    "Active task ticks_used must be zero after epoch reset"
+                );
+            }
+            j += 1;
+        }
     }
 }

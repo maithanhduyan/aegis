@@ -16,11 +16,11 @@ AegisOS is a `#![no_std]` Rust microkernel targeting QEMU `virt` machine (Cortex
 | MMU + W^X | ✅ | B | Identity-mapped page tables (L1→L2→L3, 4KB pages), WXN enforced |
 | GICv2 | ✅ | C | Interrupt controller driver (GICD + GICC) |
 | Generic Timer | ✅ | C | ARM CNTP_EL0, 10ms tick, INTID 30 |
-| Preemptive Scheduler | ✅ | C | 3 static tasks, round-robin + priority, context switch through TrapFrame |
+| Preemptive Scheduler | ✅ | C | 8 static tasks, priority-based + time budget + watchdog, context switch through TrapFrame |
 | User/Kernel Separation | ✅ | D | Tasks run at EL0, kernel at EL1, AP-bit isolation |
 | Fault Isolation | ✅ | E | EL0 faults → task killed + auto-restart (1s delay), kernel keeps running |
 | Synchronous IPC | ✅ | C | Blocking send/recv on 4 endpoints, 4-word messages |
-| Capability Access Control | ✅ | G | Per-task u64 bitmask (18 bits), least-privilege enforcement on every syscall |
+| Capability Access Control | ✅ | G | Per-task u64 bitmask (19 bits: 0–18), least-privilege enforcement on every syscall |
 | Per-Task Address Space | ✅ | H | Per-task L3 page tables, ASID-tagged TTBR0 |
 | Async Notifications | ✅ | I | Bitmask notify/wait, non-blocking |
 | Shared Memory Grants | ✅ | J | Owner/peer grant pages, revocable |
@@ -33,7 +33,7 @@ AegisOS is a `#![no_std]` Rust microkernel targeting QEMU `virt` machine (Cortex
 | Multi-ELF Loading | ✅ | O | 6 ELF slots (16 KiB each), `load_elf_to_task()`, `const_assert!` |
 | libsyscall | ✅ | O | Shared syscall library for all user binaries — single source of truth |
 | SYS_EXIT | ✅ | O | Graceful task exit, `TaskState::Exited`, `cleanup_task_resources()` |
-| Test Infrastructure | ✅ | F–O | 189+ host unit tests + 25+ QEMU boot checkpoints |
+| Test Infrastructure | ✅ | F–P | 250 host unit tests + 32 QEMU boot checkpoints + 18 Kani formal proofs |
 | CI/CD | ✅ | F | GitHub Actions — host tests + QEMU integration on every push |
 
 ## 📐 Architecture
@@ -47,20 +47,20 @@ boot.s (_start)
         ├── MMU init (identity map, W^X)
         ├── Exception vectors install
         ├── GICv2 init
-        ├── Scheduler init (3 tasks)
-        ├── Capability assignment
-        ├── ELF load (user/hello binary → task slot)
+        ├── Scheduler init (8 tasks, priority-based)
+        ├── Capability assignment (19 bits)
+        ├── ELF load (hello/sensor/logger → tasks 2–4)
         ├── Timer start (10ms tick)
         └── bootstrap() ── ERET ──► uart_driver @ EL0
                                       │
-                              ┌───────┴───────────────┐
-                              │           │           │
-                         task 0       task 1       task 2
-                       (UART drv)  (ELF hello)    (idle)
-                       prio=10     prio=5         prio=0
-                          SVC #0      SVC #0       SVC #0
-                              │           │           │
-                              └─── IPC + Notify ──────┘
+              ┌───────┴───────────────────────────────────┐
+              │         │         │         │         │
+           task 0    task 1    task 2    task 3    task 4
+         (UART drv) (client) (ELF hello)(ELF sensor)(ELF logger)
+          prio=10    prio=5   prio=5    prio=5     prio=5
+              │         │         │         │         │
+              └─────── IPC + Notify + Grants ───────┘
+                              task 7 = IDLE (wfi)
 ```
 
 ### Source Layout
@@ -72,15 +72,16 @@ src/
 │   └── aarch64/
 │       ├── mod.rs           # Re-exports all arch modules
 │       ├── boot.s           # Entry point, EL2→EL1, SP + BSS setup
-│       ├── exception.rs     # Vector table, TrapFrame (288B), SVC dispatch
+│       ├── exception.rs     # Vector table, TrapFrame (288B), SVC dispatch (14 syscalls)
 │       ├── mmu.rs           # Page tables, identity map, W^X (WXN + AP bits)
 │       └── gic.rs           # GICv2 driver (GICD + GICC)
 │
 ├── kernel/
 │   ├── mod.rs               # Re-exports all kernel modules
-│   ├── sched.rs             # Priority scheduler, 3 TCBs, budget, watchdog
+│   ├── cell.rs              # KernelCell<T> — safe UnsafeCell wrapper for globals
+│   ├── sched.rs             # Priority scheduler, 8 TCBs, budget, watchdog, 6 states
 │   ├── ipc.rs               # Synchronous endpoint IPC, blocking send/recv
-│   ├── cap.rs               # Capability access control (u64 bitmask, 18 bits)
+│   ├── cap.rs               # Capability access control (u64 bitmask, 19 bits: 0–18)
 │   ├── timer.rs             # Tick counter + tick handler logic
 │   ├── grant.rs             # Shared memory grants (owner/peer)
 │   ├── irq.rs               # IRQ binding + routing → notification
@@ -90,28 +91,30 @@ src/
 │   ├── mod.rs               # Platform module gate
 │   └── qemu_virt.rs         # MMIO addresses, memory map constants
 │
-├── main.rs                  # kernel_main(), 13 syscall wrappers, task entries
+├── main.rs                  # kernel_main(), 14 syscall wrappers, multi-ELF loading
 ├── lib.rs                   # Crate root — module tree + re-exports
 ├── exception.rs             # Host-only stub (x86_64 tests)
 ├── mmu.rs                   # Host-only stub (x86_64 tests)
 └── uart.rs                  # PL011 UART (dual cfg: real HW + host stub)
 
-user/
-└── hello/                   # Standalone EL0 user task (ELF binary)
-    ├── Cargo.toml           # no_std, no_main, panic=abort
-    ├── src/main.rs          # Entry + syscall wrappers
-    └── link.ld              # User-space linker script
+user/                            # Separate Cargo workspace (aarch64-user.json target)
+├── Cargo.toml               # workspace = ["libsyscall", "hello", "sensor", "logger"]
+├── aarch64-user.json        # Shared custom target spec for all user crates
+├── libsyscall/              # Shared syscall library (14 wrappers, single source of truth)
+├── hello/                   # EL0 task → slot 0 (task 2), WRITE + YIELD
+├── sensor/                  # EL0 task → slot 1 (task 3), SEND + YIELD + HEARTBEAT
+└── logger/                  # EL0 task → slot 2 (task 4), RECV + WRITE + YIELD
 
 tests/
-├── host_tests.rs            # 189 unit tests (x86_64, pure logic)
-├── qemu_boot_test.sh        # QEMU integration (Linux/CI) — 25 checkpoints
-└── qemu_boot_test.ps1       # QEMU integration (Windows) — 25 checkpoints
+├── host_tests.rs            # 250 unit tests (x86_64, pure logic)
+├── qemu_boot_test.sh        # QEMU integration (Linux/CI) — 32 checkpoints
+└── qemu_boot_test.ps1       # QEMU integration (Windows) — 32 checkpoints
 
 docs/
-├── blog/                    # 12 articles explaining OS concepts (Vietnamese, for kids)
-├── plan/                    # Phase plans (A through L)
-├── standard/                # DO-178C, IEC 62304, ISO 26262 references
-└── test/report/             # Test reports
+├── blog/                    # 15 articles explaining OS concepts (Vietnamese, for kids)
+├── plan/                    # Phase plans (A through P)
+├── standard/                # DO-178C, IEC 62304, ISO 26262 references + FM.A-7 proof mapping
+└── discussions/             # Multi-agent design debate transcripts
 ```
 
 ## 🔧 Build & Run
@@ -171,7 +174,7 @@ Press `Ctrl+A`, then `X` to exit QEMU.
 
 ## 🧪 Testing
 
-### Host Unit Tests (189 tests)
+### Host Unit Tests (250 tests)
 
 Pure-logic tests running on x86_64 — no QEMU needed:
 
@@ -188,21 +191,23 @@ cargo test --target x86_64-pc-windows-msvc --lib --test host_tests -- --test-thr
 | TrapFrame Layout | 4 | Size (288B), alignment, field offsets matching assembly |
 | MMU Descriptors | 18 | Bit composition, W^X invariants, AP permissions, XN, AF |
 | SYS_WRITE Validation | 12 | Pointer range checks, boundary, overflow, null |
-| Scheduler | 30 | Priority, round-robin, budget, epoch, watchdog, fault/restart |
+| Scheduler | 30 | Priority, round-robin, budget, epoch, watchdog, fault/restart, Exited |
 | IPC | 14 | Endpoint cleanup, message copy, sender queue FIFO, blocking |
-| Capabilities | 18 | Bit checks, syscall mapping (0–12), least-privilege |
+| Capabilities | 20 | Bit checks, syscall mapping (0–13), least-privilege, CAP_EXIT |
 | Notifications | 7 | Pending bits, merge, wait flag, restart clear |
-| Grants | 14 | Create, revoke, cleanup, page addr, re-create |
-| IRQ Routing | 12 | Bind, ack, route, cleanup, rebind, accumulate |
+| Grants | 17 | Create, revoke, cleanup, page addr, re-create, exhaustion, pure logic |
+| IRQ Routing | 15 | Bind, ack, route, cleanup, rebind, accumulate, no-duplicate, pure logic |
 | Per-Task Address Space | 10 | ASID, TTBR0, page table base, schedule preserve |
 | Device Map | 4 | Valid/invalid task/device, UART L2 index |
 | ELF Parser | 14 | Magic, class, arch, segments, bounds, entry point |
 | ELF Loader | 5 | Segment copy, BSS zero, validate, W^X permissions |
-| Page Table Constants | 1 | Phase J table constants |
+| Multi-ELF Loading | 17 | load_elf_to_task, const_assert, overlaps, size limits |
+| Phase P Pure Logic | 9 | Grant/IRQ/watchdog/budget pure function equivalents |
 | L6 Integration | 6 | Arch module, kernel exports, platform, cfg separation |
-| **Total** | **189** | |
+| Misc | 48 | SYS_EXIT lifecycle, sender queue, page table constants, UART, logging |
+| **Total** | **250** | |
 
-### QEMU Boot Integration (25 checkpoints)
+### QEMU Boot Integration (32 checkpoints)
 
 ```bash
 # Linux
@@ -219,14 +224,15 @@ bash tests/qemu_boot_test.sh
 | 10–14 | Notification, grant, IRQ routing, device MMIO, address spaces | H–J |
 | 15–16 | Arch separation L1, L2 | L |
 | 17–19 | ELF parser, loader, task loaded | L |
-| 20 | L5 ELF binary loaded | L |
-| 21–25 | Timer, bootstrap EL0, UART driver, ELF task output, client | A–L |
+| 20–25 | ELF binary, timer, bootstrap EL0, UART driver, ELF task output | A–L |
+| 26–32 | Multi-ELF (hello/sensor/logger), SYS_EXIT, libsyscall, IPC cross-task | O |
 
 ### CI
 
 GitHub Actions runs both test suites on every push to `main`/`develop`:
-- **Host Unit Tests** — `x86_64-unknown-linux-gnu` (189 tests)
-- **QEMU Boot Test** — Build AArch64 kernel + verify 25 boot checkpoints
+- **Host Unit Tests** — `x86_64-unknown-linux-gnu` (250 tests)
+- **QEMU Boot Test** — Build AArch64 kernel + verify 32 boot checkpoints
+- **Kani Formal Verification** — 18 proofs (Docker `aegis-dev` container)
 
 ## 🗺️ Memory Map (QEMU virt)
 
@@ -236,7 +242,8 @@ GitHub Actions runs both test suites on every push to `main`/`develop`:
 | `0x0801_0000` | GIC CPU Interface (GICC) |
 | `0x0900_0000` | UART0 (PL011) |
 | `0x4008_0000` | Kernel load address (`_start`) |
-| Linker-placed | `.text` → `.rodata` → `.data` → `.bss` → `.page_tables` (16KB) → `.task_stacks` (3×4KB) → `.user_stacks` (3×4KB) → guard page (4KB) → boot stack (16KB) |
+| `0x4010_0000` | ELF load region (6 slots × 16 KiB) |
+| Linker-placed | `.text` → `.rodata` → `.data` → `.bss` → `.page_tables` (16KB) → `.grant_pages` (8KB) → `.task_stacks` (8×4KB) → `.user_stacks` (8×4KB) → guard page (4KB) → boot stack (16KB) |
 
 ## 🔐 Syscall ABI
 
@@ -266,12 +273,28 @@ GitHub Actions runs both test suites on every push to `main`/`develop`:
 ## 🛡️ Design Constraints
 
 - **No heap.** All allocation is static (`static mut` arrays, linker sections). No `alloc` crate.
-- **No FP/SIMD.** `CPACR_EL1.FPEN = 0` — any float instruction traps.
+- **No FP/SIMD at EL0.** `CPACR_EL1.FPEN = 0b01` — FP allowed at EL1 (compiler memcpy), trapped at EL0.
 - **TrapFrame is ABI-locked.** 288 bytes, shared between Rust struct and assembly macros.
 - **W^X everywhere.** No page is both writable and executable.
 - **Capability-enforced.** Every syscall is checked against the task's capability bitmask before dispatch.
 
-## 📚 Blog Series (Vietnamese, 15 articles)
+## � Formal Verification
+
+AegisOS uses [Kani](https://model-checking.github.io/kani/) for bounded model checking, providing mathematical proofs of correctness for critical kernel logic:
+
+- **18 Kani proofs** covering 7 kernel modules (cap, sched, ipc, mmu, grant, irq, platform)
+- **Properties verified**: Capability logic, scheduler guarantees, IPC queue bounds, message integrity, cleanup completeness, grant no-overlap, IRQ routing correctness, watchdog detection, budget fairness
+- **Proof coverage mapping**: [`docs/standard/05-proof-coverage-mapping.md`](docs/standard/05-proof-coverage-mapping.md) (DO-333 FM.A-7)
+
+```bash
+# Run all Kani proofs (requires aegis-dev Docker container)
+docker exec -w /workspaces/aegis aegis-dev cargo kani --tests
+# Expected: 18 harnesses, 18 passed, 0 failed
+```
+
+> Full architecture documentation: [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
+
+## �📚 Blog Series (Vietnamese, 15 articles)
 
 Explanations of OS concepts written for 5th-graders — making kernel development accessible:
 
