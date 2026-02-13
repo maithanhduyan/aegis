@@ -57,6 +57,12 @@ jobs:
             --lib --test host_tests \
             -- --test-threads=1
 
+      - name: Kani proof count sanity check
+        run: |
+          PROOF_COUNT=$(grep -rc 'kani::proof' src/ || echo 0)
+          echo "Kani proofs found: $PROOF_COUNT (expected: 18)"
+          test "$PROOF_COUNT" -ge 18 || { echo "WARN: proof count < 18 — did you remove a proof?"; exit 1; }
+
   # ─── AArch64 Build + QEMU Boot ──────────────────────────────────
   qemu-boot:
     name: QEMU Boot Test (AArch64)

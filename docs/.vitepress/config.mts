@@ -44,6 +44,7 @@ export default defineConfig({
             { text: '#13 — Safety Assurance', link: '/blog/13-lam-sao-chung-minh-phan-mem-khong-co-loi' },
             { text: '#14 — Scale & Verify', link: '/blog/14-tu-3-len-8-va-chung-minh-bang-toan-hoc' },
             { text: '#15 — Multi-ELF & User Ecosystem', link: '/blog/15-ba-chuong-trinh-mot-he-sinh-thai' },
+            { text: '#16 — Toán Học Bảo Vệ Phần Mềm', link: '/blog/16-khi-toan-hoc-bao-ve-phan-mem' },
           ],
         },
       ],

@@ -27,7 +27,7 @@ pub const GRANT_PAGE_SIZE: usize = 4096;
 // ─── Grant struct ──────────────────────────────────────────────────
 
 /// A shared memory grant — tracks who owns and shares a page.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Grant {
     /// Task that created the grant (None = slot unused)
     pub owner: Option<usize>,

@@ -37,7 +37,7 @@ pub const ERR_NOT_OWNER: u64 = 0xFFFF_1005;
 // ─── IrqBinding struct ────────────────────────────────────────────
 
 /// An IRQ-to-task binding — routes a hardware INTID to a notification.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct IrqBinding {
     /// Hardware interrupt ID (SPI, ≥ 32)
     pub intid: u32,

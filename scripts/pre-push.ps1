@@ -68,6 +68,14 @@ if ($testText -match 'test result: ok\. (\d+) passed') {
     $failed = 1
 }
 
+# Step 1.5: Kani proof count sanity check
+$proofCount = (Select-String -Path src\*.rs,src\kernel\*.rs,src\platform\*.rs -Pattern 'kani::proof' -SimpleMatch | Measure-Object).Count
+if ($proofCount -ge 18) {
+    Write-Host "  ✓ Kani proof count: $proofCount (expected ≥ 18)" -ForegroundColor Green
+} else {
+    Write-Host "  ⚠ Kani proof count: $proofCount (expected ≥ 18) — did you remove a proof?" -ForegroundColor Yellow
+}
+
 # Step 2: QEMU boot test (only if qemu available)
 Write-Host ""
 $qemuExists = Get-Command qemu-system-aarch64 -ErrorAction SilentlyContinue

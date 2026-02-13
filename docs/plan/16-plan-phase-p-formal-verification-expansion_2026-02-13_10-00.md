@@ -443,20 +443,20 @@ CI job `miri-check` pass trên host tests (trừ asm-dependent tests).
 
 1. [x] Review kế hoạch Phase P → consensus 100% (2 rounds)
 2. [x] Cập nhật plan per consensus decisions
-3. [ ] **P1**: 8 pure functions `#[cfg(kani)]` (grant ×3, irq ×3, sched ×2) + TODO comments
-4. [ ] **P1**: ~8 host unit tests cho pure functions
-5. [ ] **P1**: Verify 241 existing tests still pass
-6. [ ] **P2**: 3 Kani proofs cho grant (full symbolic, MAX_GRANTS=2)
-7. [ ] **P2**: 3 Kani proofs cho irq (constrained: intid 32–127, task_id < 8)
-8. [ ] **P2**: 2 Kani proofs cho watchdog/budget (constrained)
-9. [ ] **P2**: Verify 18/18 proofs pass trong aegis-dev Docker
-10. [ ] **P4**: FM.A-7 mapping document (`docs/standard/05-proof-coverage-mapping.md`)
-11. [ ] **P4**: README refresh (A+: numbers + layout + FV paragraph + links)
-12. [ ] **P4**: Miri shim skeleton (`#[cfg(miri)]` KernelCell, ~15 lines)
-13. [ ] **P4**: Grant cleanup asymmetry comment (4 lines)
-14. [ ] **P4**: 1-line CI proof count check
-15. [ ] Regression: 32/32 QEMU checkpoints pass
-16. [ ] Viết blog #16 kể chuyện Phase P (handoff → Aegis-StoryTeller)
+3. [x] **P1**: 8 pure functions `#[cfg(kani)]` (grant ×3, irq ×3, sched ×2) + TODO comments
+4. [x] **P1**: 9 host unit tests cho pure functions (250/250 pass)
+5. [x] **P1**: Verify 250 tests pass (241 existing + 9 new)
+6. [x] **P2**: 3 Kani proofs cho grant (full symbolic, MAX_GRANTS=2)
+7. [x] **P2**: 3 Kani proofs cho irq (constrained: intid 32–127, task_id < 8)
+8. [x] **P2**: 2 Kani proofs cho watchdog/budget (constrained)
+9. [x] **P2**: Verify 18/18 proofs pass trong aegis-dev Docker ✅
+10. [x] **P4**: FM.A-7 mapping document (`docs/standard/05-proof-coverage-mapping.md`)
+11. [x] **P4**: README refresh (A+: numbers + layout + FV paragraph + links)
+12. [x] **P4**: Miri shim skeleton (`#[cfg(miri)]` KernelCell, ~15 lines)
+13. [x] **P4**: Grant cleanup asymmetry comment (4 lines)
+14. [x] **P4**: 1-line CI proof count check (ci.yml + pre-push.ps1)
+15. [x] Regression: 32/32 QEMU checkpoints pass ✅
+16. [x] Viết blog #16 kể chuyện Phase P ✅
 
 ### Backlog Items (Phase Q+)
 
