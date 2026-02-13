@@ -35,7 +35,11 @@
         "cargo kani": true,
         "cargo install": true,
         "kani": true,
-        "cargo llvm-cov": true
+        "cargo llvm-cov": true,
+        "git rev-parse": true,
+        "rustc": true,
+        "docker ps": true,
+        "docker exec": true
     }
 
 }

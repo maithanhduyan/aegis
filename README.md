@@ -2,6 +2,8 @@
 [![Deploy Static Blog](https://github.com/maithanhduyan/aegis/actions/workflows/static-page.yml/badge.svg)](https://github.com/maithanhduyan/aegis/actions/workflows/static-page.yml)
 [![AegisOS CI](https://github.com/maithanhduyan/aegis/actions/workflows/ci.yml/badge.svg)](https://github.com/maithanhduyan/aegis/actions/workflows/ci.yml)
 
+> 🇻🇳 [Đọc bằng tiếng Việt](docs/README.vi.md)
+
 **Bare-metal AArch64 microkernel for safety-critical systems.**
 
 AegisOS is a `#![no_std]` Rust microkernel targeting QEMU `virt` machine (Cortex-A53). Zero heap, zero external dependencies — designed from scratch for environments where failure is not an option: rockets, medical devices, autonomous vehicles.
@@ -278,7 +280,7 @@ GitHub Actions runs both test suites on every push to `main`/`develop`:
 - **W^X everywhere.** No page is both writable and executable.
 - **Capability-enforced.** Every syscall is checked against the task's capability bitmask before dispatch.
 
-## � Formal Verification
+## 🔬 Formal Verification
 
 AegisOS uses [Kani](https://model-checking.github.io/kani/) for bounded model checking, providing mathematical proofs of correctness for critical kernel logic:
 
@@ -294,7 +296,7 @@ docker exec -w /workspaces/aegis aegis-dev cargo kani --tests
 
 > Full architecture documentation: [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
 
-## �📚 Blog Series (Vietnamese, 15 articles)
+## 📚 Blog Series (Vietnamese, 15 articles)
 
 Explanations of OS concepts written for 5th-graders — making kernel development accessible:
 
@@ -323,6 +325,38 @@ AegisOS is developed with awareness of industry safety standards:
 - **ISO 26262** — Automotive functional safety
 
 See [docs/standard/](docs/standard/) for Vietnamese summaries.
+
+## 💎 Sponsors
+
+### 🏆 Nhà tài trợ chính / Main Sponsor
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://tayafood.com">
+        <img src="https://tayafood.com/favicon.ico" width="80" alt="TAYAFOOD.COM" /><br />
+        <b>TAYAFOOD.COM</b>
+      </a>
+    </td>
+  </tr>
+</table>
+
+> **Cảm ơn [TAYAFOOD.COM](https://tayafood.com)** đã tin tưởng và tài trợ cho dự án AegisOS.
+> Sự hỗ trợ của TAYAFOOD.COM giúp chúng tôi duy trì và phát triển một hệ điều hành mã nguồn mở an toàn, phục vụ cộng đồng nghiên cứu và giáo dục.
+
+---
+
+### 🤝 Trở thành nhà tài trợ / Become a Sponsor
+
+AegisOS là dự án mã nguồn mở phi lợi nhuận. Nếu bạn hoặc tổ chức của bạn muốn hỗ trợ:
+
+| Tier | Quyền lợi | Liên hệ |
+|---|---|---|
+| 🥇 **Gold** | Logo trên README + Blog + trang docs | [Liên hệ qua GitHub Issues](https://github.com/maithanhduyan/aegis/issues) |
+| 🥈 **Silver** | Tên trên README + cảm ơn trong blog | [Liên hệ qua GitHub Issues](https://github.com/maithanhduyan/aegis/issues) |
+| 🥉 **Bronze** | Tên trong danh sách cảm ơn | [Liên hệ qua GitHub Issues](https://github.com/maithanhduyan/aegis/issues) |
+
+> ⭐ Bạn cũng có thể hỗ trợ bằng cách **star repo**, **chia sẻ dự án**, hoặc **đóng góp code**. Mọi sự giúp đỡ đều có ý nghĩa!
 
 ## 📄 License
 

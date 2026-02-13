@@ -3,6 +3,5 @@ target = "../aarch64-user.json"
 
 [target.aarch64-user]
 rustflags = [
-  "-C", "link-arg=-Tlinker.ld",
   "-C", "link-arg=-zmax-page-size=4096",
 ]
