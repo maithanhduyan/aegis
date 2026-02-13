@@ -41,9 +41,9 @@ check() {
 }
 
 # ─── Build user/hello ELF binary (needed by include_bytes!) ─────────
-echo -e "${YELLOW}[1/4] Building user/hello ELF binary...${NC}"
-if ! (cd user/hello && cargo build --release -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem) 2>&1; then
-    echo -e "${RED}user/hello build failed!${NC}"
+echo -e "${YELLOW}[1/4] Building user ELF binaries...${NC}"
+if ! (cd user && cargo build --release -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem) 2>&1; then
+    echo -e "${RED}user build failed!${NC}"
     exit 2
 fi
 
@@ -89,8 +89,10 @@ check "Arch separation L1"          "[AegisOS] arch separation: module tree read
 check "Arch separation L2"          "[AegisOS] arch separation: complete"
 check "ELF64 parser ready"          "[AegisOS] ELF64 parser ready"
 check "ELF loader ready"            "[AegisOS] ELF loader ready"
-check "ELF task loaded"             "[AegisOS] task 2 loaded from ELF"
-check "L5 ELF binary loaded"        "[AegisOS] client task loaded from ELF binary"
+check "ELF task 2 loaded"           "[AegisOS] task 2 (hello) loaded from ELF"
+check "ELF task 3 loaded"           "[AegisOS] task 3 (sensor) loaded from ELF"
+check "ELF task 4 loaded"           "[AegisOS] task 4 (logger) loaded from ELF"
+check "Multi-ELF complete"          "[AegisOS] multi-ELF loading complete"
 check "Timer started"               "[AegisOS] timer started"
 check "Enhanced panic handler"      "[AegisOS] enhanced panic handler ready"
 check "klog ready"                   "[AegisOS] klog ready"
@@ -98,7 +100,9 @@ check "Safety audit complete"        "[AegisOS] safety audit complete"
 check "Bootstrap into EL0"          "[AegisOS] bootstrapping into uart_driver"
 check "UART driver ready"           "DRV:ready"
 check "L5 ELF task output"          "L5:ELF"
-check "User-mode driver output"     "J4:UserDrv"
+check "Task 2 exited"               "[AegisOS] task 2 exited (code=0)"
+check "Sensor initialized"          "SENSOR:init"
+check "Client uses driver"          "J4:UserDrv"
 
 # ─── Summary ───────────────────────────────────────────────────────
 echo ""
